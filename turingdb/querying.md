@@ -9,18 +9,31 @@ Read queries run directly against the current graph state — no change workflow
 
 ```python
 df = client.query("MATCH (n:Person) RETURN n.name, n.age")
+#   n.name  n.age
+# 0  Alice     30
+# 1    Bob     25
 ```
+
+`query()` always returns a pandas DataFrame with typed columns. Column names match the RETURN expressions.
+
+## Naming Conventions
+
+- Node labels: `PascalCase` — `Person`, `BankAccount`
+- Edge types: `UPPER_SNAKE_CASE` — `KNOWS`, `FRIENDS_WITH`
+- Properties: `camelCase` — `firstName`, `createdAt`
+- String values: single quotes — `'Alice'`, `'London'`
 
 ## MATCH
 
 ```cypher
-MATCH (n) RETURN n
-MATCH (n:Person) RETURN n.name, n.age
-MATCH (n:Person {name: 'Alice'}) RETURN n.age          -- inline property filter
-MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name
-MATCH (a)-[e]->(b) RETURN a, e, b                      -- capture edge variable
-MATCH (a:Person)-[e:KNOWS]->(b:Person) RETURN a, e, b
-MATCH (a)-[e1]->(b)-[e2]->(c) RETURN a, c              -- multi-hop
+MATCH (n) RETURN n                                      -- all nodes
+MATCH (n:Person) RETURN n.name, n.age                   -- by label
+MATCH (n:Person {name: 'Alice'}) RETURN n.age           -- inline property filter
+MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name  -- directed edge
+MATCH (a)-[e]->(b) RETURN a, e, b                       -- capture edge variable
+MATCH (a:Person)-[e:KNOWS]->(b:Person) RETURN a, e, b   -- typed edge + label
+MATCH (a)-[e1]->(b)-[e2]->(c) RETURN a, c               -- multi-hop
+MATCH (a:Person)-[e]-(b:Person) RETURN a.name, b.name   -- undirected (either direction)
 ```
 
 ## WHERE
@@ -88,10 +101,61 @@ MATCH (n) RETURN n.val + n.tax
 | Type | Cypher Example | pandas column type |
 |------|----------------|--------------------|
 | String | `name: 'Alice'` | `str` |
-| Integer | `age: 30` | `int64` |
+| Int64 | `age: 30` | `int64` |
+| UInt64 | `count: 100` | `uint64` |
 | Boolean | `flag: true` | `bool` |
 | Double | `score: 3.14` | `float64` |
 | Embedding | `emb: [1.2, 2.0, 0.0]` | array |
+
+## Not Supported
+
+TuringDB does **not** support:
+
+- **UNWIND** — no list unwinding
+- **Parameterised queries** — `$param` syntax is not implemented
+- **Lists in WHERE** — `WHERE n.name IN ['Alice', 'Bob']` does not work for string lists
+
+## Injecting Seed Nodes
+
+Because there is no UNWIND or parameter support, the way to inject a set of seed nodes into a query is to use `OR` chains in WHERE. Two approaches:
+
+**By internal node ID** (most efficient). When you `RETURN n`, the column contains the node's internal ID (a `UInt64`). Use those IDs directly:
+
+```cypher
+MATCH (a)-->(b)-->(c) WHERE a = 17 OR a = 18 OR a = 42
+RETURN a, b, c
+
+-- Multi-hop from specific starting nodes:
+MATCH (a)-->(b)-->(c)-->(d)
+WHERE a = 5 OR a = 12
+RETURN b, c, d
+```
+
+**By user-level property** — works with any property type:
+
+```cypher
+MATCH (a:Person)-->(b)
+WHERE a.name = 'Alice' OR a.name = 'Bob' OR a.name = 'Carol'
+RETURN a.name, b
+
+MATCH (a:Gene)-->(b:Pathway)
+WHERE a.accession = 'BRCA1' OR a.accession = 'TP53'
+RETURN a.accession, b.name
+```
+
+In Python, build the `OR` chain programmatically for either approach:
+
+```python
+# By internal node ID
+seed_ids = [17, 18, 42]
+where_clause = " OR ".join(f"a = {id}" for id in seed_ids)
+df = client.query(f"MATCH (a)-->(b)-->(c) WHERE {where_clause} RETURN a, b, c")
+
+# By property value
+names = ["Alice", "Bob", "Carol"]
+where_clause = " OR ".join(f"a.name = '{name}'" for name in names)
+df = client.query(f"MATCH (a:Person)-->(b) WHERE {where_clause} RETURN a.name, b")
+```
 
 ## Gotchas
 

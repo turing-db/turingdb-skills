@@ -19,9 +19,11 @@ TuringDB is a columnar graph database with git-like versioning. Its query langua
 from turingdb import TuringDB
 
 client = TuringDB(host="http://localhost:6666")   # full URL, not separate host/port
-client.load_graph("my_graph")    # load existing graph
+client.load_graph("my_graph")    # load existing graph into memory
+client.set_graph("my_graph")     # set as current graph context
 # or
 client.create_graph("my_graph")  # create new graph
+client.set_graph("my_graph")     # set as current graph context
 ```
 
 Start the server with `turingdb start` (foreground) or `turingdb start -demon` (background). Default port is 6666. Use `-turing-dir <path>` to point at a specific data directory.
@@ -36,6 +38,6 @@ Based on what the user is asking, immediately read the matching file from this s
 | Reading data — MATCH, WHERE, filtering, traversal, joins | `querying.md` |
 | Writing data — CREATE, SET, updating the graph | `writing.md` |
 | Graph algorithms — shortest path, vector/embedding search | `algorithms.md` |
-| Exploring an unfamiliar graph, versioning, time travel | `introspection.md` |
+| Exploring an unfamiliar graph, versioning, time travel, data import | `introspection.md` |
 
 If the task spans multiple areas (e.g. start the server then query it), read the files in sequence.

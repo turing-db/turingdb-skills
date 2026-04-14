@@ -86,23 +86,42 @@ If the server fails to start, re-run Step 1 to confirm installation succeeded.
 ## Step 4 — List and load a graph
 
 ```python
-available = client.list_available_graphs()
-print("Available graphs:", available)
+available = client.list_available_graphs()  # all graphs on disk
+print("Available graphs:", available)       # → ['mygraph', 'default']
 
-loaded = client.list_loaded_graphs()
-print("Already loaded:", loaded)
+loaded = client.list_loaded_graphs()        # graphs currently in memory
+print("Already loaded:", loaded)            # → ['default']
 ```
 
-If the graph you want is not already loaded, load it:
+If the graph you want is not already loaded, load it and set it as the current context:
 
 ```python
-client.load_graph("my_graph")
+client.load_graph("my_graph")   # loads into memory — raises TuringDBException if already loaded
+client.set_graph("my_graph")    # set SDK context — required before querying
 ```
 
-If no graphs exist yet, create one:
+If no graphs exist yet, create one and set it as the current context:
 
 ```python
-client.create_graph("my_graph")
+client.create_graph("my_graph")  # raises TuringDBException if name already taken
+client.set_graph("my_graph")
+```
+
+**Idempotent helper pattern** (safe to call repeatedly):
+
+```python
+from turingdb import TuringDB, TuringDBException
+
+client = TuringDB(host="http://localhost:6666")
+try:
+    client.create_graph("my_graph")
+except TuringDBException:
+    pass  # already exists
+try:
+    client.load_graph("my_graph")
+except TuringDBException:
+    pass  # already loaded
+client.set_graph("my_graph")
 ```
 
 ## Step 5 — Explore the graph

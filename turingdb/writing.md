@@ -21,6 +21,47 @@ client.checkout()                  # return to main
 
 Never run CREATE or SET outside a change — they will silently not persist.
 
+## Complete End-to-End Example
+
+```python
+from turingdb import TuringDB, TuringDBException
+
+client = TuringDB(host="http://localhost:6666")
+
+# Set up graph
+try:
+    client.create_graph("demo")
+except TuringDBException:
+    pass
+try:
+    client.load_graph("demo")
+except TuringDBException:
+    pass
+client.set_graph("demo")
+
+# Write data
+change = client.new_change()
+client.checkout(change=change)
+
+client.query("CREATE (:Person {name: 'Alice', age: 30})-[:KNOWS]->(:Person {name: 'Bob', age: 25})")
+client.query("CREATE (:City {name: 'London'})")
+client.query("COMMIT")  # persist so nodes are visible for next query
+
+client.query("""
+    MATCH (a:Person {name: 'Alice'}), (c:City {name: 'London'})
+    CREATE (a)-[:LIVES_IN]->(c)
+""")
+
+client.query("CHANGE SUBMIT")
+client.checkout()
+
+# Verify
+df = client.query("MATCH (n:Person)-[:LIVES_IN]->(c:City) RETURN n.name, c.name")
+print(df)
+#   n.name  c.name
+# 0  Alice  London
+```
+
 ## Creating Nodes and Edges
 
 **Single query (preferred):** Create nodes and edges together — no intermediate COMMIT needed:
@@ -100,6 +141,8 @@ These can be issued via `client.query()` or from the CLI:
 ## Gotchas
 
 - CREATE/SET outside a change do not persist — always use the change workflow
-- Creating nodes and edges in separate queries requires `COMMIT` between the two steps
-- Pure CREATE has no RETURN clause
-- Every node and edge must have at least one label
+- Creating nodes and edges in separate queries requires `COMMIT` between the two steps so the first set of nodes are visible to the second query
+- Pure CREATE has no RETURN clause — only MATCH+CREATE supports RETURN
+- Every node and edge must have at least one label — `CREATE (n)` will error; use `CREATE (n:Label)`
+- `CHANGE SUBMIT` merges the change into main. After submitting, call `client.checkout()` to return the SDK context to main
+- `create_graph()` raises `TuringDBException` if the graph name already exists; `load_graph()` raises if already loaded. Wrap in try/except for idempotent scripts (see `startup.md`)
