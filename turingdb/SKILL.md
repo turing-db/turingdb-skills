@@ -20,9 +20,9 @@ client.create_graph("my_graph")  # create new graph
 
 Start the server with `turingdb start` (foreground) or `turingdb start -demon` (background). Default port is 6666. Use `-turing-dir <path>` to point at a specific data directory.
 
-## Where to go next
+## Routing
 
-Read the relevant file from this same directory using the Read tool:
+Based on what the user is asking, immediately read the matching file from this same directory using the Read tool. Do not ask the user which file to read — determine it from context.
 
 | Task | File |
 |------|------|
@@ -31,3 +31,5 @@ Read the relevant file from this same directory using the Read tool:
 | Writing data — CREATE, SET, updating the graph | `writing.md` |
 | Graph algorithms — shortest path, vector/embedding search | `algorithms.md` |
 | Exploring an unfamiliar graph, versioning, time travel | `introspection.md` |
+
+If the task spans multiple areas (e.g. start the server then query it), read the files in sequence.
