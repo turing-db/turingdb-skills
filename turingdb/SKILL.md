@@ -1,6 +1,12 @@
 ---
 name: turingdb
-description: Entrypoint for all TuringDB work. Use this first to get oriented, then follow the pointer to the right skill for your task.
+description: >
+  Start, query, write, and manage TuringDB columnar graph databases using the Python SDK and Cypher dialect.
+  TRIGGER when: code imports `turingdb` or `TuringDB`; user mentions TuringDB, turing db, or turing database;
+  user asks about TuringDB Cypher queries, graph versioning with changes/commits, vector search in TuringDB,
+  or the `turingdb` CLI; files contain TuringDB connection strings (localhost:6666) or TuringDB SDK calls
+  (`client.query`, `client.new_change`, `client.load_graph`).
+  SKIP: generic graph/Neo4j/Cypher questions with no TuringDB mention; general database work unrelated to TuringDB.
 ---
 
 # TuringDB
