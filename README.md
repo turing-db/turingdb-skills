@@ -15,7 +15,13 @@ Claude Code skills that teach agents how to start, query, and manage [TuringDB](
 
 ## Install
 
-Copy the skill into your Claude Code skills directory:
+The easiest method is using the skills CLI:
+
+```bash
+npx skills add https://github.com/turing-db/turingdb-skills
+```
+
+Alternatively, copy the skill manually into your Claude Code skills directory:
 
 ```bash
 cp -r turingdb ~/.claude/skills/
