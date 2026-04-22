@@ -126,6 +126,53 @@ MATCH (n:Person) WHERE n.age < 18 SET n.isMinor = true
 MATCH (n:Person {name: 'Alice'}) SET n.emb = [1.2, 2.0, 0.0, 12.0]
 ```
 
+## LOAD CSV
+
+Bulk-create nodes and/or edges from a CSV file, one row at a time. Must run inside a change like any other CREATE; the file must live in the `data` subdirectory (`~/.turing/data` by default), same as `LOAD GML` / `LOAD JSONL`.
+
+**Positional access (no headers):**
+
+```cypher
+LOAD CSV 'mycsv.csv' AS row
+CREATE (:NewNode {name: row[0], age: row[3], isFrench: row[2]})
+```
+
+**Named access (with headers):**
+
+```cypher
+LOAD CSV 'mycsv.csv' WITH HEADERS AS row
+CREATE (:NewNode {name: row.names, age: row.ages, isFrench: row.isFrenches})
+```
+
+**Multi-pattern CREATE per row** — a single `LOAD CSV` can create several nodes and edges from the same row:
+
+```cypher
+LOAD CSV 'relationships.csv' WITH HEADERS AS row
+CREATE (:Person {name: row.source})-[:KNOWS]->(:Person {name: row.target})
+```
+
+**Typing:** types are deduced automatically per cell — there is no explicit cast syntax. Numeric columns become `Int64` / `Double`, booleans become `Bool`, everything else `String`.
+
+**Restrictions:**
+- `LOAD CSV` + `MATCH` is **not currently supported** — you cannot match pre-existing nodes while streaming rows. To attach edges to nodes that already exist, load the rows into a staging label first, `COMMIT`, then run a separate `MATCH ... CREATE` query to wire them up.
+
+## CREATE INDEX
+
+TuringDB supports indexes on node and edge properties. Index DDL runs inside a change — the index becomes observable only after a subsequent `COMMIT` (within the change) or `CHANGE SUBMIT` (to main).
+
+```cypher
+CREATE INDEX personNameIdx FOR (n) ON n.name
+CREATE INDEX knowsSinceIdx FOR [e] ON e.since
+```
+
+**Grammar:**
+CREATE INDEX <index_name> FOR <pattern> ON <variable>.<propertyName>
+where `<pattern>` is a bare node pattern `(n)` or a bare edge pattern `[e]`.
+
+**Restrictions:**
+- The pattern cannot yet be constrained by label or type — only `FOR (n)` and `FOR [e]` are accepted. `FOR (n:Person)` and `FOR [e:KNOWS]` are **not yet supported**.
+- `DROP INDEX ... IF EXISTS` is **not supported**. To inspect the current index set use `CALL db.showIndexes()` (see `introspection.md`).
+
 ## Engine Commands for Change Management
 
 These can be issued via `client.query()` or from the CLI:
@@ -146,3 +193,6 @@ These can be issued via `client.query()` or from the CLI:
 - Every node and edge must have at least one label — `CREATE (n)` will error; use `CREATE (n:Label)`
 - `CHANGE SUBMIT` merges the change into main. After submitting, call `client.checkout()` to return the SDK context to main
 - `create_graph()` raises `TuringDBException` if the graph name already exists; `load_graph()` raises if already loaded. Wrap in try/except for idempotent scripts (see `startup.md`)
+- `LOAD CSV` + `MATCH` is not supported. Load rows as nodes, `COMMIT`, then `MATCH ... CREATE` for edges to pre-existing nodes
+- `CREATE INDEX` / `LOAD CSV` both require the change workflow. Indexes are only visible after `COMMIT` or `CHANGE SUBMIT`
+- `CREATE INDEX` patterns cannot be label/type-constrained yet — use `(n)` / `[e]`, not `(n:Label)` / `[e:TYPE]`
