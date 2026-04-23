@@ -13,6 +13,7 @@ Before writing queries against a graph you don't know, use these procedures to u
 CALL db.labels()           -- all node labels
 CALL db.edgeTypes()        -- all edge types
 CALL db.propertyTypes()    -- all property keys and their data types
+CALL db.showIndexes()      -- all currently loaded indexes
 CALL db.history()          -- full commit history
 ```
 
@@ -39,6 +40,8 @@ print(df)
 # 3   3         flag      Bool
 # 4   4          emb Embedding
 ```
+
+`CALL db.showIndexes()` is the canonical way to confirm an index landed after `CHANGE SUBMIT` — there is no `DROP INDEX IF EXISTS` to probe against.
 
 ## Graph and Change Management
 
