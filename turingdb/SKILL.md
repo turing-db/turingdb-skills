@@ -38,6 +38,7 @@ Based on what the user is asking, immediately read the matching file from this s
 | Reading data — MATCH, WHERE, filtering, traversal, joins | `querying.md` |
 | Writing data — CREATE, SET, updating the graph | `writing.md` |
 | Graph algorithms — shortest path, vector/embedding search | `algorithms.md` |
-| Exploring an unfamiliar graph, versioning, time travel, data import | `introspection.md` |
+| Exploring an unfamiliar graph, versioning, time travel, GML/JSONL import | `introspection.md` |
+| Importing Parquet files via the `turing-parquet` CLI (turingdb ≥ 1.32) | `parquet.md` |
 
 If the task spans multiple areas (e.g. start the server then query it), read the files in sequence.

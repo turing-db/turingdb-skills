@@ -12,6 +12,7 @@ Claude Code skills that teach agents how to start, query, and manage [TuringDB](
 | `writing.md` | CREATE, SET, and the change/commit workflow |
 | `algorithms.md` | Shortest path (Dijkstra), vector/embedding search |
 | `introspection.md` | Explore schema, versioning, time travel, SDK reference |
+| `parquet.md` | Import Parquet files into a graph via the `turing-parquet` CLI |
 
 ## Install
 
