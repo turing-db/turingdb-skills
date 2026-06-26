@@ -7,12 +7,12 @@ Claude Code skills that teach agents how to start, query, and manage [TuringDB](
 | File | Covers |
 |------|--------|
 | `SKILL.md` | Entry point — routes to the right reference based on your task |
-| `startup.md` | Install the package, start the server, connect, load a graph |
+| `startup.md` | Install the package, connect to a server (or run embedded), load/create a graph |
 | `querying.md` | MATCH, WHERE, joins, ordering, functions |
 | `writing.md` | CREATE, SET, and the change/commit workflow |
+| `importing.md` | Import external data — JSONL, GML, Parquet, Neo4j migration |
 | `algorithms.md` | Shortest path (Dijkstra), vector/embedding search |
 | `introspection.md` | Explore schema, versioning, time travel, SDK reference |
-| `parquet.md` | Import Parquet files into a graph via the `turing-parquet` CLI |
 
 ## Install
 
@@ -42,13 +42,13 @@ You should see the routing table. The skill automatically reads the relevant sub
 
 Just invoke `/turingdb` and describe what you want to do. Examples:
 
-- `/turingdb start the server at ~/mydata and load my_graph`
+- `/turingdb connect to the local TuringDB server and load my_graph`
 - `/turingdb query all Person nodes connected to Company nodes`
 - `/turingdb add a new node with label Protein and name TP53`
 - `/turingdb find the shortest path between two Station nodes`
 - `/turingdb explore the schema of the loaded graph`
 
-If the task spans multiple areas (e.g. start the server then query it), the skill reads multiple reference files in sequence.
+If the task spans multiple areas (e.g. connect then query), the skill reads multiple reference files in sequence.
 
 ## Uninstall
 

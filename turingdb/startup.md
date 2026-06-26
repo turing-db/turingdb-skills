@@ -1,132 +1,57 @@
 ---
 name: turingdb-startup
-description: Use when TuringDB needs to be started before querying — finds the binary in the project's virtual environment, starts the server if not already running, connects with the SDK, and loads a graph ready for exploration.
+description: Use when connecting to TuringDB before querying — installs the package, connects to a running TuringDB server (the default), or runs the engine in-process (embedded) for self-contained work, then loads/creates a graph ready for exploration.
 ---
 
 # TuringDB: Startup & Connection
 
-## Step 1 — Ensure turingdb is installed
+By default, connect to a running TuringDB **server** over HTTP — this is the backend the SDK uses unless told otherwise, and it's what the browser visualizer, on-disk graph discovery, concurrent multi-process access, and S3 transfers all require. If you want a self-contained engine with no server to manage, use the in-process (embedded) backend instead (see the last section).
 
-Check whether the package is available, and install it if not:
+## Step 1 — Ensure turingdb is installed
 
 ```bash
 uv add turingdb
 ```
 
-If the project doesn't use uv, fall back to:
+If the project doesn't use uv:
 
 ```bash
 pip install turingdb
 ```
 
-## Step 2 — Check if the server is already running
+The wheel includes both the `turingdb` CLI (used to start a server) and the in-process engine.
 
-Try connecting first. If it succeeds, skip to Step 4.
+## Step 2 — Connect to a server
 
-```python
-from turingdb import TuringDB
-
-try:
-    client = TuringDB(host="http://localhost:6666")
-    client.list_loaded_graphs()
-    print("Server already running")
-    # skip to Step 4
-except Exception:
-    print("Server not running, starting it...")
-    # continue to Step 3
-```
-
-Note: `host` is the full URL (`http://localhost:6666`), not a hostname with a separate `port` argument.
-
-## Step 3 — Find and start the binary
-
-The binary has `start` and `stop` subcommands (`start` is the default if omitted). **Flags use a single dash**: `-turing-dir`, `-demon`, `-load`, `-p`, `-i`.
-
-Useful flags:
-- `-turing-dir <path>` — root data directory (contains `graphs/`, `data/`, etc.)
-- `-demon` — run as background daemon
-- `-load <graph>` — load a graph at startup (saves a separate `load_graph()` call)
-- `-p <port>` — override default port 6666
-- `-in-memory` — don't persist writes to disk
-- `-ui` — launch the browser visualizer proxy on port 8080
-
-Try each invocation in order, stopping at the first one that works:
-
-```bash
-# Option 1: uv project (recommended — uv resolves the venv automatically)
-uv run turingdb start -turing-dir <path> -demon
-
-# Option 2: uv-managed venv at standard location
-.venv/bin/turingdb start -turing-dir <path> -demon
-
-# Option 3: standard Python venv
-venv/bin/turingdb start -turing-dir <path> -demon
-
-# Option 4: activated venv or global install
-turingdb start -turing-dir <path> -demon
-```
-
-To load a graph at the same time as starting the server:
-```bash
-uv run turingdb start -turing-dir <path> -load <graph_name> -demon
-```
-
-After starting, verify the server is up:
+Connect to a running TuringDB server — it may already be running. `host` is the full URL, not a host+port pair.
 
 ```python
 from turingdb import TuringDB
 
-client = TuringDB(host="http://localhost:6666")
-client.list_loaded_graphs()  # raises if not ready
-print("Server started successfully")
+client = TuringDB(host="http://localhost:6666")   # HTTP/JSON client (the default backend)
+client.list_loaded_graphs()                        # raises if the server isn't reachable
 ```
 
-If the server fails to start, re-run Step 1 to confirm installation succeeded.
+If nothing is listening on that port, start a server first ("Starting a server" below), then connect.
 
-## Step 4 — List and load a graph
+## Step 3 — Create or load a graph
+
+A fresh server starts on the `default` graph. To work on a specific graph, create it or load an existing one by name:
 
 ```python
-available = client.list_available_graphs()  # all graphs on disk
-print("Available graphs:", available)       # → ['mygraph', 'default']
+client.create_graph("my_graph")   # create new
+# or
+client.load_graph("my_graph")     # load an existing on-disk graph by name
+client.set_graph("my_graph")      # make it the active graph
 
-loaded = client.list_loaded_graphs()        # graphs currently in memory
-print("Already loaded:", loaded)            # → ['default']
+print("Loaded:", client.list_loaded_graphs())
 ```
 
-If the graph you want is not already loaded, load it and set it as the current context:
+To discover on-disk graphs you haven't loaded yet, use `client.list_available_graphs()` (server/`json` backend only — not available in embedded mode).
 
-```python
-client.load_graph("my_graph")   # loads into memory — raises TuringDBException if already loaded
-client.set_graph("my_graph")    # set SDK context — required before querying
-```
+## Step 4 — Explore the graph
 
-If no graphs exist yet, create one and set it as the current context:
-
-```python
-client.create_graph("my_graph")  # raises TuringDBException if name already taken
-client.set_graph("my_graph")
-```
-
-**Idempotent helper pattern** (safe to call repeatedly):
-
-```python
-from turingdb import TuringDB, TuringDBException
-
-client = TuringDB(host="http://localhost:6666")
-try:
-    client.create_graph("my_graph")
-except TuringDBException:
-    pass  # already exists
-try:
-    client.load_graph("my_graph")
-except TuringDBException:
-    pass  # already loaded
-client.set_graph("my_graph")
-```
-
-## Step 5 — Explore the graph
-
-Once connected and a graph is loaded, read `introspection.md` (in this same directory) to map the shape of the data:
+Once a graph is loaded, read `introspection.md` (same directory) to map its shape:
 
 ```python
 df_labels     = client.query("CALL db.labels()")
@@ -134,16 +59,57 @@ df_edge_types = client.query("CALL db.edgeTypes()")
 df_props      = client.query("CALL db.propertyTypes()")
 ```
 
-Print these results before writing any queries — they tell you what node labels, edge types, and properties exist.
+Print these before writing queries — they tell you what node labels, edge types, and properties exist.
 
-## Stopping the server
+---
 
-You **must** pass the same `-turing-dir` used at startup — otherwise `stop` looks at the default `~/.turing` and reports no instance found.
+## Starting a server
+
+Start a server with the `turingdb` CLI if one isn't already running. `turingdb` has `start` and `stop` subcommands (`start` is the default). **Flags use a single dash**: `-turing-dir`, `-demon`, `-load`, `-p`, `-i`, `-in-memory`, `-ui`, `-ui-port`, `-reset-default`, `-start-timeout`.
+
+| Flag | Meaning |
+|------|---------|
+| `-turing-dir <path>` | Root data directory (contains `graphs/`, `data/`) |
+| `-demon` | Run as a background daemon |
+| `-load <graph>` | Load a graph at startup (repeatable) |
+| `-p <port>` | Override default port 6666 |
+| `-in-memory` | Don't persist writes to disk |
+| `-ui` / `-ui-port <port>` | Launch the browser visualizer (default port 8080) |
+| `-start-timeout <ms>` | Time to wait for daemon readiness (default 500) |
+
+Try each invocation in order, stopping at the first that works:
 
 ```bash
-# If started with -turing-dir:
-uv run turingdb stop -turing-dir <path>
-
-# Default data directory (~/.turing):
-uv run turingdb stop
+uv run turingdb start -turing-dir <path> -demon     # uv project (recommended)
+.venv/bin/turingdb start -turing-dir <path> -demon  # uv/standard venv
+turingdb start -turing-dir <path> -demon            # activated/global install
 ```
+
+Load a graph at startup in the same command: add `-load <graph_name>`. Launch the visualizer with `-ui` (then open `http://localhost:8080`).
+
+### Stopping the server
+
+Pass the **same `-turing-dir`** used at startup — otherwise `stop` looks at the default `~/.turing` and reports no instance found.
+
+```bash
+uv run turingdb stop -turing-dir <path>   # if started with -turing-dir
+uv run turingdb stop                       # default data directory (~/.turing)
+```
+
+Add `-timeout <ms>` (alias `-t <ms>`) to change how long `stop` waits for the process to release its lock (default 3000).
+
+---
+
+## Alternative: run in-process (embedded)
+
+When you want a self-contained engine with no server to start, stop, or connect to, use the **embedded** backend — it runs the database in-process.
+
+```python
+from turingdb import TuringDB
+
+client = TuringDB(type="embedded", data_dir="<path>")   # in-process, no server; omit data_dir for ~/.turing
+```
+
+`data_dir` is the root data directory (holds `graphs/`, `data/`, …); omit it to use the default `~/.turing`. There is no daemon, socket, port, readiness polling, or stop/cleanup. Writes still persist to disk on `CHANGE SUBMIT` (same `data_dir`), so work survives the process ending.
+
+The embedded backend does **not** support the browser visualizer, `list_available_graphs()`, concurrent multi-process access, or S3 transfers — use a server for those.
