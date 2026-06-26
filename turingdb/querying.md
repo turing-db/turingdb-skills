@@ -9,32 +9,31 @@ Read queries run directly against the current graph state — no change workflow
 
 ```python
 df = client.query("MATCH (n:Person) RETURN n.name, n.age")
-#   n.name  n.age
-# 0  Alice     30
-# 1    Bob     25
 ```
-
-`query()` always returns a pandas DataFrame with typed columns. Column names match the RETURN expressions.
-
-## Naming Conventions
-
-- Node labels: `PascalCase` — `Person`, `BankAccount`
-- Edge types: `UPPER_SNAKE_CASE` — `KNOWS`, `FRIENDS_WITH`
-- Properties: `camelCase` — `firstName`, `createdAt`
-- String values: single quotes — `'Alice'`, `'London'`
 
 ## MATCH
 
 ```cypher
-MATCH (n) RETURN n                                      -- all nodes
-MATCH (n:Person) RETURN n.name, n.age                   -- by label
-MATCH (n:Person {name: 'Alice'}) RETURN n.age           -- inline property filter
-MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name  -- directed edge
-MATCH (a)-[e]->(b) RETURN a, e, b                       -- capture edge variable
-MATCH (a:Person)-[e:KNOWS]->(b:Person) RETURN a, e, b   -- typed edge + label
-MATCH (a)-[e1]->(b)-[e2]->(c) RETURN a, c               -- multi-hop
-MATCH (a:Person)-[e]-(b:Person) RETURN a.name, b.name   -- undirected (either direction)
+MATCH (n) RETURN n
+MATCH (n:Person) RETURN n.name, n.age
+MATCH (n:Person {name: 'Alice'}) RETURN n.age          -- inline property filter
+MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name
+MATCH (a)-[e]->(b) RETURN a, e, b                      -- capture edge variable
+MATCH (a:Person)-[e:KNOWS]->(b:Person) RETURN a, e, b
+MATCH (a)<-[e]-(b) RETURN a, b                         -- reverse direction
+MATCH (a)-[e]-(b) RETURN a, b                          -- undirected
+MATCH (a)-[e1]->(b)-[e2]->(c) RETURN a, c              -- multi-hop
 ```
+
+**Variable-length paths** use a postfix quantifier on the segment (`->+`, `->*`, `->{n,m}`) — *not* the Neo4j inline `-[*1..3]-` form:
+
+```cypher
+MATCH (a:Person)-[e]->+(b:Person) RETURN a, b          -- one or more hops
+MATCH (a:Person)-[e]->*(b:Person) RETURN a, b          -- zero or more hops
+MATCH (a:Person)-[e]->{2,4}(b:Interest) RETURN a, b    -- bounded: 2 to 4 hops
+```
+
+Quantifiers: `+` (1+), `*` (0+), `{n,m}` (bounded).
 
 ## WHERE
 
@@ -44,11 +43,12 @@ MATCH (n) WHERE n.name = 'Alice' RETURN n
 MATCH (n) WHERE n.age >= 18 AND n.city = 'London' RETURN n.name
 MATCH (n) WHERE n.med = 'Aspirin' OR n.med = 'Ibuprofen' RETURN n.name
 MATCH (n) WHERE n.institution IS NOT NULL RETURN n
+MATCH (n) WHERE n = 0 OR n = 1 RETURN n                     -- match by internal node ID
 MATCH (n)-[e]->(m) WHERE e:KNOWS RETURN n.name, m.name      -- filter on edge label
 MATCH (n)-[e]->(m) WHERE e.since > 2020 RETURN n.name       -- filter on edge property
 ```
 
-Operators: `=`, `<>`, `<`, `<=`, `>`, `>=`, `IS NULL`, `IS NOT NULL`
+Operators: `=`, `<>`, `<`, `<=`, `>`, `>=`, `IS NULL`, `IS NOT NULL`. Boolean combiners: `AND`, `OR`. Arithmetic in expressions: `+ - * /`.
 
 Inline property filter `{name: 'Alice'}` is exactly equivalent to `WHERE n.name = 'Alice'`.
 
@@ -58,10 +58,13 @@ Inline property filter `{name: 'Alice'}` is exactly equivalent to `WHERE n.name 
 -- Cartesian product (N × M rows) — comma separates independent patterns:
 MATCH (p:Person), (c:City) RETURN p.name, c.name
 
--- Join — shared variable links the patterns:
+-- Join — shared variable links the patterns (TuringDB runs a hash join):
 MATCH (a:Person)-->(i:Interest)<--(b:Person)
 WHERE a.name <> b.name
 RETURN a.name, b.name
+
+-- Join on a value via WHERE (also a hash join):
+MATCH (a:Person), (b:Person) WHERE a.hasPhD = b.hasPhD RETURN a.name, b.name
 
 -- Mixed: join on one pattern, cartesian on another:
 MATCH (a:Person)-->(i:Interest), (c:Category)
@@ -86,78 +89,67 @@ MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC SKIP 10 LIMIT 10
 MATCH (n) RETURN n.price * 1.1
 MATCH ()-[r]->() RETURN r.a / r.b
 MATCH (n) RETURN n.val + n.tax
+MATCH (n) RETURN n.age + 5 AS adjusted_age                 -- alias with AS
 ```
 
 ## Built-in Functions
 
+**Scalar functions** (usable in both RETURN and WHERE):
+
 | Function | Example | Notes |
 |----------|---------|-------|
-| `labels(n)` | `RETURN labels(n), n.name` | Returns node label as string. **RETURN only — not usable in WHERE** |
+| `labels(n)` | `RETURN labels(n), n.name` | Node label as string |
+| `edgeType(e)` | `RETURN edgeType(e)` | Edge type as string |
 | `toInteger(expr)` | `WHERE n.year > toInteger("2020")` | Parse string to int |
 | `toFloat(expr)` | `RETURN n.price * toFloat("1.07")` | Parse string to float |
+| `toBoolean(expr)` | `RETURN toBoolean("true")` | Parse string to bool |
+| `cosine_similarity(a, b)` | `RETURN cosine_similarity(n.emb, (0.4, 0.3))` | Cosine similarity of two embeddings |
+| `euclidean_distance(a, b)` | `RETURN euclidean_distance(n.emb, (0.4, 0.3))` | Euclidean distance of two embeddings |
+
+**Aggregate functions** (RETURN only — *not* valid in WHERE / ORDER BY / SKIP / LIMIT; only valid with a single return item):
+
+| Function | Example |
+|----------|---------|
+| `count(n)` / `count(*)` | `MATCH (n:Person) RETURN count(*)` |
+| `avg(expr)` | `MATCH (n:Person) RETURN avg(n.age)` |
+
+Aggregates may be combined within that single return item, e.g. `RETURN count(n) + avg(n.age)`.
+
+## UNWIND and list literals
+
+```cypher
+UNWIND [1, 2, 3] AS x RETURN x          -- expand a list into one row per element
+RETURN [1, 2, 3] AS nums                -- return a list literal directly
+```
+
+`UNWIND` accepts **literal lists only** — `UNWIND someVar`, `UNWIND $param`, and `UNWIND collect(...)` are not yet supported. List literals use brackets `[...]`; their elements must be literals.
+
+## LOAD CSV
+
+`LOAD CSV` streams rows from a CSV file (under the `data/` directory) as a reading statement:
+
+```cypher
+LOAD CSV "people.csv" WITH HEADERS AS row RETURN row.name, row.age   -- by column name
+LOAD CSV "people.csv" AS row RETURN row[0], row[1]                    -- by 0-based index
+```
+
+Add `ON ERROR SKIP` to skip malformed rows (default is `ON ERROR FAIL`). All values come back as strings — wrap in `toInteger`/`toFloat` as needed. To build a graph, drive `CREATE` from it inside a change: `LOAD CSV "people.csv" WITH HEADERS AS row CREATE (:Person {name: row.name})`. (`LOAD CSV` followed by `MATCH` in one statement is not yet supported.)
 
 ## Data Types
 
 | Type | Cypher Example | pandas column type |
 |------|----------------|--------------------|
-| String | `name: 'Alice'` | `str` |
-| Int64 | `age: 30` | `int64` |
-| UInt64 | `count: 100` | `uint64` |
-| Boolean | `flag: true` | `bool` |
+| String | `name: 'Alice'` | `string` |
+| Integer | `age: 30` | `Int64` |
+| Unsigned integer | — | `UInt64` |
+| Boolean | `flag: true` | `boolean` |
 | Double | `score: 3.14` | `float64` |
-| Embedding | `emb: [1.2, 2.0, 0.0]` | array |
+| Embedding | `emb: (1.2, 2.0, 0.0)` | array |
 
-## Not Supported
-
-TuringDB does **not** support:
-
-- **UNWIND** — no list unwinding
-- **Parameterised queries** — `$param` syntax is not implemented
-- **Lists in WHERE** — `WHERE n.name IN ['Alice', 'Bob']` does not work for string lists
-
-## Injecting Seed Nodes
-
-Because there is no UNWIND or parameter support, the way to inject a set of seed nodes into a query is to use `OR` chains in WHERE. Two approaches:
-
-**By internal node ID** (most efficient). When you `RETURN n`, the column contains the node's internal ID (a `UInt64`). Use those IDs directly:
-
-```cypher
-MATCH (a)-->(b)-->(c) WHERE a = 17 OR a = 18 OR a = 42
-RETURN a, b, c
-
--- Multi-hop from specific starting nodes:
-MATCH (a)-->(b)-->(c)-->(d)
-WHERE a = 5 OR a = 12
-RETURN b, c, d
-```
-
-**By user-level property** — works with any property type:
-
-```cypher
-MATCH (a:Person)-->(b)
-WHERE a.name = 'Alice' OR a.name = 'Bob' OR a.name = 'Carol'
-RETURN a.name, b
-
-MATCH (a:Gene)-->(b:Pathway)
-WHERE a.accession = 'BRCA1' OR a.accession = 'TP53'
-RETURN a.accession, b.name
-```
-
-In Python, build the `OR` chain programmatically for either approach:
-
-```python
-# By internal node ID
-seed_ids = [17, 18, 42]
-where_clause = " OR ".join(f"a = {id}" for id in seed_ids)
-df = client.query(f"MATCH (a)-->(b)-->(c) WHERE {where_clause} RETURN a, b, c")
-
-# By property value
-names = ["Alice", "Bob", "Carol"]
-where_clause = " OR ".join(f"a.name = '{name}'" for name in names)
-df = client.query(f"MATCH (a:Person)-->(b) WHERE {where_clause} RETURN a.name, b")
-```
+Strings accept single quotes, double quotes, or backticks. **Embedding literals use parentheses** `(1.2, 2.0, 0.0)` (min 2 items); `[...]` is a list literal, a different type. The `UInt64` dtype is used for unsigned-integer results.
 
 ## Gotchas
 
-- `labels(n)` cannot be used in WHERE — only in RETURN
+- Aggregate functions (`count`, `avg`) are valid only in RETURN — using them in WHERE/ORDER BY/SKIP/LIMIT errors with "Invalid use of aggregate expression in this context"
 - Comma-separated patterns are cartesian products, not joins — always check if you intended a join (shared variable) instead
+- Keywords are case-insensitive (`MATCH` == `match`), but label/type names are case-sensitive
