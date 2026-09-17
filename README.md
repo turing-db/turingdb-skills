@@ -13,6 +13,12 @@ Claude Code skills that teach agents how to start, query, and manage [TuringDB](
 | `algorithms.md` | Shortest path (Dijkstra), vector/embedding search |
 | `introspection.md` | Explore schema, versioning, time travel, SDK reference |
 
+A second, standalone skill:
+
+| Skill | Covers |
+|------|--------|
+| `turingdb-findings/SKILL.md` | Turning real usage into an actionable defect and feature-gap register for the engine team — severity banding, what makes a finding reproducible, and the traps that make a test report success over nothing |
+
 ## Install
 
 The easiest method is using the skills CLI:
