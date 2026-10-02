@@ -1,6 +1,6 @@
 ---
 name: turingdb-algorithms
-description: Use when running path and graph algorithms in TuringDB v3 — weighted shortest path (Dijkstra statement), hop-count and weighted routes via variable-length paths, vector/embedding similarity search (HNSW/flat indexes), embedding properties and writing computed embeddings back with LOAD EMBEDDING, and GNN neighbourhood sampling procedures.
+description: Use when running path and graph algorithms in TuringDB v3 — weighted shortest path (Dijkstra statement), hop-count and weighted routes via variable-length paths, vector/embedding similarity search (HNSW/flat indexes), embedding properties and writing computed embeddings back with LOAD EMBEDDING, and distributed GNN training (GraphSAGE / DGL / PyTorch) with server-side sampling via gnn.graphSAGE.
 ---
 
 # TuringDB: Algorithms
@@ -221,21 +221,65 @@ LOAD JSONL "mydata.jsonl" AS mygraph WITH EMBEDDINGS [{"emb", 384}, {"summary_ve
 
 ---
 
-## GNN sampling procedures
+## GNN training: sample on TuringDB with `gnn.graphSAGE` (distributed)
 
-Two built-in procedures sample neighbourhoods for graph-neural-network training (signatures via `SHOW PROCEDURES`):
+TuringDB can be the sampling engine for **distributed GNN training**. Each trainer worker (e.g. a DGL / PyTorch process under `torch.distributed`) opens its own TuringDB client. For every mini-batch, it asks the server for that batch's 3-hop GraphSAGE neighbourhood with **one** `CALL gnn.graphSAGE(...)`.
+- **Server side:** TuringDB does all the neighbour sampling, and many workers can sample concurrently against one server.
+- **Worker side:** workers only turn the sampled edges into message-flow blocks and train. Gradients are synchronized with `torch.distributed` as usual.
+- **Write-back:** after training, write the learned embeddings back onto the nodes with `LOAD EMBEDDING` (see above).
+
+**Use the procedure. Do not implement sampling yourself.** Don't write multi-hop `MATCH` path queries, don't sample in Python, and don't export the graph to sample client-side. The reference implementation is [turingdb-dgl-example](https://github.com/turing-db/turingdb-dgl-example) (`run_distributed.py`, `distributed/graph_backend/turingdb_backend.py`).
 
 ```cypher
-// Reservoir-sample up to 2 incoming neighbours of a node (seed optional, for reproducibility)
-MATCH (n:Station {name: 'Worcester Shrub Hill'})
-CALL gnn.neighbourhoodSample(n, 2, 42) YIELD src, edge, edgeType, tgt
-RETURN src.name, edgeType, tgt.name
-
-// GraphSAGE-style 3-hop sampling from seed node IDs with per-hop fanouts
-CALL gnn.graphSAGE([8, 12], [10, 5, 5], 7) YIELD *
+CALL gnn.graphSAGE([4, 17, 42], [15, 10, 5], 7)
+YIELD src_nodes0, tgt_nodes0, src_nodes1, tgt_nodes1, src_nodes2, tgt_nodes2
+RETURN src_nodes0, tgt_nodes0, src_nodes1, tgt_nodes1, src_nodes2, tgt_nodes2
 ```
 
-- `gnn.neighbourhoodSample` samples **incoming** edges. A node with no in-edges yields no rows.
-- `gnn.graphSAGE(seeds, fanouts, seed)` takes a list of exactly 3 fanouts. It yields `dst_nodes0..2`, `src_nodes0..2` and `tgt_nodes0..2`.
+`gnn.graphSAGE(seeds, fanouts, seed = null)`:
+- **`seeds`:** a **literal list of native node IDs** (the batch's seed nodes). Arguments must be constants, so build the list in Python. There is no key-property mode; map your keys to native IDs once (`RETURN id(n)`).
+- **`fanouts`:** exactly **3** integers, one per hop, ordered **from the seeds outwards**: hop 0 samples the seeds' neighbours. DGL lists fanouts from the input layer to the seeds, so **reverse** them. Each fanout can be at most 65,536.
+- **`seed`:** an optional integer for reproducible sampling. Omit it for fresh randomness per batch.
+- **Yields, per hop `h` = 0, 1, 2:**
+  - `dst_nodesh`: the hop-h frontier (hop 0 = the seeds; hop h+1 = the sources sampled at hop h).
+  - `src_nodesh`, `tgt_nodesh`: the sampled edges. Each row is an **in-edge** `src → tgt` of a frontier node `tgt`, so `src` is the sampled neighbour. A node with no in-edges samples nothing, so store reverse edges too if the graph should be read as undirected.
+- **Different lengths:** each hop has its own number of rows, and the result is **null-padded** to the longest hop. Drop nulls per column (`df[col].dropna()`), never per row.
+
+Building DGL blocks from one call (adapted from the reference implementation):
+
+```python
+import dgl, numpy as np, torch
+
+def sample_blocks(client, seed_ids: torch.Tensor, fanouts: list[int], num_nodes: int):
+    ids = seed_ids.tolist()                          # native node IDs, inlined as a literal list
+    hop_fanouts = list(reversed(fanouts))            # DGL order (input→seeds) → seeds-outward
+    cols = ", ".join(f"{s}_nodes{h}" for h in range(3) for s in ("src", "tgt"))
+    df = client.query(f"CALL gnn.graphSAGE({ids}, {hop_fanouts}) YIELD {cols} RETURN {cols}")
+
+    def col(name):
+        return torch.from_numpy(df[name].dropna().to_numpy(dtype=np.int64))
+
+    dst = torch.tensor(ids, dtype=torch.int64)
+    blocks = []
+    for h in range(3):                               # hop 0 = edges into the seeds
+        g = dgl.graph((col(f"src_nodes{h}"), col(f"tgt_nodes{h}")), num_nodes=num_nodes)
+        block = dgl.to_block(g, dst)
+        blocks.insert(0, block)                      # DGL wants the input-side block first
+        dst = block.srcdata[dgl.NID]
+    return dst, blocks                               # dst = input nodes whose features you need
+```
+
+**Distributed setup:**
+- **One client per worker:** each worker process creates its own `TuringDB(host=...)` client against the same server. Rank 0 can `load_graph` while the others tolerate "already loaded".
+- **Native IDs everywhere:** seeds, negative samples and train/test splits all use native node IDs. Broadcast the split from rank 0, or cache it as memory-mapped `.npy` files.
+- **Write-back:** write the trained embeddings with one `LOAD EMBEDDING` from a Parquet file (`node_id`, `embedding`). This is much faster than per-node `SET`.
+
+`gnn.neighbourhoodSample(node, sampleSize, seed = null)` is the one-hop building block. It reservoir-samples up to `sampleSize` **in-edges** of a node and yields `src, edge, edgeType, tgt`. For training, prefer `gnn.graphSAGE`, which does all 3 hops for a whole batch in one call.
+
+```cypher
+MATCH (n) WHERE n = 42
+CALL gnn.neighbourhoodSample(n, 10, 7) YIELD src, edgeType, tgt
+RETURN src, edgeType, tgt
+```
 
 There are no built-in PageRank, community-detection or centrality procedures. Compute those client-side (e.g. export edges with `MATCH (a)-[r]->(b) RETURN id(a), id(b)` into networkx), or approximate them with Cypher aggregation (e.g. degree via `COUNT { (n)--() }`).

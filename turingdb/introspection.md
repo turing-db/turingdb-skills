@@ -56,8 +56,8 @@ df["properties"] = df["properties"].map(json.loads)
 | `db.getNodes(nodeIDs :: LIST)` | `id, labels, inEdgeCount, outEdgeCount, properties` |
 | `db.getEdges(edgeIDs :: LIST)` | `id, src, tgt, edgeTypeID, properties` |
 | `db.getNodeEdges(nodeIDs, defaultLimit, outLimitTypes, outLimitValues, inLimitTypes, inLimitValues, returnOnlyIDs)` | `id, outgoingEdges, incomingEdges, outEdgeCounts, inEdgeCounts` |
-| `gnn.neighbourhoodSample(node, sampleSize, seed = null)` | `src, edge, edgeType, tgt` (see `algorithms.md`) |
-| `gnn.graphSAGE(seeds, fanouts, seed = null)` | `dst_nodes0..2, src_nodes0..2, tgt_nodes0..2` |
+| `gnn.neighbourhoodSample(node, sampleSize, seed = null)` | `src, edge, edgeType, tgt`; samples in-edges (see `algorithms.md`) |
+| `gnn.graphSAGE(seeds, fanouts, seed = null)` | `dst_nodes0..2, src_nodes0..2, tgt_nodes0..2`; 3-hop sampler for distributed GNN training (see `algorithms.md`) |
 
 ### CALL ... YIELD — chaining procedures into queries
 

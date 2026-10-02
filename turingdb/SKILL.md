@@ -4,6 +4,7 @@ description: >
   Start, query, write, and manage TuringDB (v3) columnar graph databases using the Python SDK and Cypher.
   TRIGGER when: code imports `turingdb` or `TuringDB`; user mentions TuringDB, turing db, or turing database;
   user asks about TuringDB Cypher queries, graph versioning with changes/commits, vector search in TuringDB,
+  GNN training / neighbourhood sampling from TuringDB (DGL, PyTorch, GraphSAGE),
   or the `turingdb` CLI; files contain TuringDB connection strings (localhost:6666) or TuringDB SDK calls
   (`client.query`, `client.new_change`, `client.load_graph`).
   SKIP: generic graph/Neo4j/Cypher questions with no TuringDB mention; general database work unrelated to TuringDB.
@@ -61,7 +62,7 @@ Based on what the user is asking, immediately read the matching file from this s
 | Reading data: MATCH, OPTIONAL MATCH, WHERE, paths, WITH, aggregation, UNWIND, subqueries, functions, LOAD CSV | `querying.md` |
 | Writing data: CREATE, MERGE, SET, REMOVE, DELETE, the change/commit workflow, indexes | `writing.md` |
 | Importing external data: CSV, JSONL, GML, Parquet (`LOAD PARQUET` and `turing-parquet`), Neo4j migration | `importing.md` |
-| Paths and algorithms: shortest path, variable-length paths, vector/embedding search, writing embeddings back (`LOAD EMBEDDING`), GNN sampling | `algorithms.md` |
+| Paths and algorithms: shortest path, variable-length paths, vector/embedding search, writing embeddings back (`LOAD EMBEDDING`), distributed GNN training with `gnn.graphSAGE` sampling | `algorithms.md` |
 | Exploring an unfamiliar graph, procedures, versioning/time travel, SDK reference | `introspection.md` |
 
 If the task spans multiple areas (e.g. connect then query), read the files in sequence.
