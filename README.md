@@ -2,17 +2,19 @@
 
 Claude Code skills that teach agents how to start, query, and manage [TuringDB](https://docs.turingdb.ai/) graph databases.
 
+Targets **TuringDB v3** (`turingdb>=3.0` on PyPI). v3 runs every query on the new engine and supports most of openCypher. The skill documents what works, what doesn't, and where TuringDB differs from Neo4j Cypher.
+
 ## What's included
 
 | File | Covers |
 |------|--------|
-| `SKILL.md` | Entry point — routes to the right reference based on your task |
-| `startup.md` | Install the package, connect to a server (or run embedded), load/create a graph |
-| `querying.md` | MATCH, WHERE, joins, ordering, functions |
-| `writing.md` | CREATE, SET, and the change/commit workflow |
-| `importing.md` | Import external data — JSONL, GML, Parquet, Neo4j migration |
-| `algorithms.md` | Shortest path (Dijkstra), vector/embedding search |
-| `introspection.md` | Explore schema, versioning, time travel, SDK reference |
+| `SKILL.md` | Entry point — key differences from Neo4j Cypher, then routes to the right reference based on your task |
+| `startup.md` | Install the package, start/stop a server, connect (HTTP, auth token, embedded), load/create a graph |
+| `querying.md` | MATCH/OPTIONAL MATCH, variable-length and quantified paths, WITH, aggregation, UNWIND, subqueries, functions, LOAD CSV, result types |
+| `writing.md` | CREATE, MERGE, SET, REMOVE, DETACH DELETE, bulk writes, indexes, and the change/commit workflow |
+| `importing.md` | Import external data — CSV, Parquet (`LOAD PARQUET`, `turing-parquet`), JSONL, GML, Neo4j migration |
+| `algorithms.md` | Shortest path, path finding with variable-length patterns, vector/embedding search, GNN sampling |
+| `introspection.md` | Explore schema, procedures, versioning, time travel, SDK reference |
 
 ## Install
 
@@ -46,6 +48,7 @@ Just invoke `/turingdb` and describe what you want to do. Examples:
 - `/turingdb query all Person nodes connected to Company nodes`
 - `/turingdb add a new node with label Protein and name TP53`
 - `/turingdb find the shortest path between two Station nodes`
+- `/turingdb import people.csv and knows.csv into a new graph`
 - `/turingdb explore the schema of the loaded graph`
 
 If the task spans multiple areas (e.g. connect then query), the skill reads multiple reference files in sequence.
