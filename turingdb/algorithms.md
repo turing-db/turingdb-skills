@@ -40,8 +40,9 @@ A join can feed an endpoint, e.g. `MATCH (x {name: 'Bromsgrove'})-[:LINK]->(a), 
 ```python
 row = client.query("MATCH (a:Station {name:'A'}), (b:Station {name:'B'}) "
                    "shortestPath(a, b, distance, dist, path) RETURN dist, path").iloc[0]
-node_ids = [int(i) for i in row["path"][0::2]]     # even positions are nodes
-names = client.query(f"MATCH (n) WHERE id(n) IN {node_ids} RETURN id(n) AS id, n.name AS name")
+node_ids = sorted({int(i) for i in row["path"][0::2]})   # even positions are nodes; distinct
+names = client.query(f"UNWIND {node_ids} AS x MATCH (n) WHERE n = x RETURN id(n) AS id, n.name AS name")
+# literal list of distinct IDs, x not returned, so this is a constant scan
 ```
 
 - **Don't call path functions on its output.** `nodes(path)`, `length(path)` and comprehensions over `path` are not supported.
@@ -121,7 +122,7 @@ WHERE score > 0.8
 MATCH (doc)-[:ABOUT]->(t:Topic)
 RETURN doc.title, t.name, score
 
-// Equivalent explicit join
+// Slower: re-matching the node scans the label and cross-joins it with the results
 VECTOR SEARCH IN my_index FOR 5 (1.2, 0.5, 3.0, 0.1) YIELD ids
 MATCH (n:Document) WHERE n = ids
 RETURN n.title
@@ -129,7 +130,8 @@ RETURN n.title
 
 - **Syntax:** `VECTOR SEARCH IN <index> FOR <k> (<vector>) YIELD ids [AS x][, score [AS s]]`.
 - **The query vector's dimension must match the index.** A mismatch is an error.
-- **If the vector file holds your own IDs** rather than TuringDB node IDs, join on the property that stores them instead: `MATCH (n:Document) WHERE n.doc_id = ids`.
+- **Key the vector file by native node IDs, and use `ids` directly.** `ids` is then the node itself, so `ids.title` and `MATCH (ids)-[...]->(...)` read and expand it without any lookup. Don't re-match it with `MATCH (n:Document) WHERE n = ids` (label scan + cross product), and don't key the file by your own IDs, because joining them back through a property (`WHERE n.doc_id = ids`) is a label scan as well.
+- **After `MERGE_DATAPARTS`**, which renumbers nodes, rebuild a node-ID-keyed vector index.
 - In the result DataFrame, `ids` is UInt64.
 
 ### Index management
@@ -179,7 +181,7 @@ client.checkout()
 ```
 
 **File format:**
-- `node_id` is the **TuringDB internal node ID** (`id(n)`), not a business key. Read it in the same session you write back in, because IDs can be renumbered when a change is committed.
+- `node_id` is the **native TuringDB node ID** (`id(n)`), not a business key. It is stable across submits and restarts, but re-read it after `MERGE_DATAPARTS`, which renumbers nodes.
 - `embedding` must be a **fixed-size binary** column (`pa.binary(dim * 4)`). A list or fixed-size-list column is rejected ("missing embedding column").
 
 **Behaviour:**

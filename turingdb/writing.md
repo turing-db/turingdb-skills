@@ -53,7 +53,7 @@ client.checkout()
 - **Disjoint edits submit cleanly.** If two changes edit the same entity, the second `CHANGE SUBMIT` fails. Example error: `This change attempted to update Node 0 (...) which has been modified on main.`
 - **Conflict detection is coarse.** Creating an edge to a node that was modified on main also conflicts.
 - **A failed submit rejects the whole change but leaves it open.** You can still fix it, or run `CHANGE DELETE`.
-- **Node and edge IDs are provisional until COMMIT/SUBMIT.** They may be renumbered then. Match on properties, not on IDs you read earlier.
+- **IDs of newly created nodes and edges are provisional until COMMIT/SUBMIT.** Read them after committing. IDs of existing nodes are stable across submits and restarts, so keep using them (only `MERGE_DATAPARTS` renumbers). See "Addressing nodes by native node ID" in `querying.md`.
 
 ## CREATE
 
@@ -67,7 +67,10 @@ CREATE (c:City {name: 'Li' + 'lle', pop: 2 * 1000, tags: ['a', 'b'], info: {zone
 CREATE (n:Item {sku: 'A1'}) SET n.price = 9.99 RETURN n.sku                      // CREATE then SET
 CREATE (a:W {k: 'a'}) WITH a CREATE (b:W {k: 'b'})-[:NEXT]->(a)                  // WITH between writes
 
-// Connect existing nodes (they must be committed or created earlier in this same query):
+// Connect existing nodes (they must be committed or created earlier in this same query).
+// If you know their native node IDs, address them directly (fastest; constants only, see note below):
+MATCH (a) WHERE a = 12 MATCH (b) WHERE b = 34 CREATE (a)-[:KNOWS {since: 2021}]->(b)
+// Otherwise by a key property:
 MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
 CREATE (a)-[:KNOWS {since: 2021}]->(b)
 RETURN a.name, b.name
@@ -79,6 +82,7 @@ RETURN a.name, b.name
 - **Property types are global.** Each property name has **one value type across the whole graph** (see `CALL db.propertyTypes()`). If `age` is an Integer, `CREATE (:X {age: 'old'})` and `SET n.age = 2.5` both fail with `types … are incompatible`. There is no Int → Double widening.
 - **Nulls:** `{name: null}` is rejected in CREATE. Leave the key out instead.
 - **No variable-length edges in write patterns.** You also can't reuse a matched edge variable in CREATE.
+- **Creating edges between known nodes:** use their native node IDs as two **literal constants** per query (`MATCH (a) WHERE a = 12 MATCH (b) WHERE b = 34 CREATE …`). That is about 0.1 ms per edge server-side on a 1M-node graph. **Never** take both endpoints from one UNWIND row (`a = p[0]`, `b = p[1]`): that plans as a cross product of two full node scans and can run the server out of memory. For thousands of edges, use `LOAD PARQUET`.
 - **Edges:** parallel edges and self-loops are allowed. An undirected CREATE `(a)-[:R]-(b)` is accepted and creates `a->b`.
 
 ## MERGE
@@ -115,7 +119,8 @@ MATCH (n:Person {name: 'Alice'}) SET n.tags = ['a', 'b'], n.meta = {level: 3}   
 MATCH (n:Person {name: 'Alice'}) SET n.emb = (1.2, 2.0, 0.0, 12.0)                 // one-off Embedding; in bulk use LOAD EMBEDDING
 MATCH (n:Person {name: 'Alice'}) SET n.joined = datetime('2024-03-15T10:30:00Z')
 MATCH (a:Person) WITH count(a) AS c MATCH (s:Stats {name: 'people'}) SET s.total = c   // aggregate via WITH
-MATCH (n) WHERE n = 1234 SET n.flag = true                                          // by internal ID
+MATCH (n) WHERE n = 1234 SET n.flag = true                                          // by native node ID: direct seek (fastest)
+UNWIND [12, 34, 56] AS x MATCH (n) WHERE n = x SET n.flag = true                    // batch: literal, distinct node IDs
 MATCH (n:Person {name: 'Alice'}) SET n.age = null                                  // clear a value
 MATCH (n:Person {name: 'Alice'}) REMOVE n.score, n.flag                            // remove properties
 ```

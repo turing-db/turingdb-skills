@@ -47,15 +47,47 @@ The WHERE of an OPTIONAL MATCH belongs to the optional part, so rows are kept, a
 
 **Gotcha:** an unmatched optional **node** returned bare (`RETURN c`) shows `18446744073709551615` (UINT64_MAX) rather than null. Properties (`c.name`) and `id(c)` are correctly null.
 
-### Matching by internal ID
+### Addressing nodes by native node ID (the fast path)
+
+Every node has a native node ID: the integer you get from `RETURN n` or `id(n)`. **Whenever you already know which node(s) you want, address them by comparing the node variable itself with the native ID, written as a literal in the query: `WHERE n = <id>`.** The planner turns that into a constant scan of exactly those nodes (`const_scan_nodes`). Don't look them up again through a user-level key property such as `n.pid`, `n.uuid` or `n.doc_id`.
 
 ```cypher
-MATCH (n) WHERE n = 4 RETURN n.name              // or id(n) = 4
-MATCH (n) WHERE id(n) IN [0, 4] RETURN n.name
-MATCH ()-[r]->() WHERE id(r) = 0 RETURN startNode(r), endNode(r)
+MATCH (n) WHERE n = 4 RETURN n.name                                   // direct seek
+MATCH (n)-[:KNOWS]->(m) WHERE n = 4 RETURN m.name                     // seek, then expand
+UNWIND [4, 17, 42] AS x MATCH (n) WHERE n = x RETURN n.name           // batch: folded into one constant scan
+UNWIND [4, 17, 42] AS x MATCH (n) WHERE n = x SET n.flag = true       // batch write by ID (inside a change)
 ```
 
-`elementId()` does not exist. Internal IDs can change when a change is committed or rebased, so don't persist them. Match on your own key properties instead.
+Measured on a 1M-node graph (server-side time):
+
+| Lookup | Time |
+|---|---|
+| `WHERE n = <id>` | **0.16 ms** (constant scan) |
+| `WHERE id(n) = <id>` | 1.4 ms (full node scan; grows with graph size) |
+| `UNWIND [<1,000 literal IDs>] AS x` + `WHERE n = x` | **1.4 ms total (≈1.4 µs per node)** |
+| `UNWIND` keys + `MATCH (n:P {pid: x})` | ≈1.1 ms **per node**, index or not (≈800× slower) |
+
+**Rules:**
+- **Compare the variable, not the function.** `WHERE n = 123` seeks, but `WHERE id(n) = 123` scans every node. Use `id(n)` only to *return* the ID.
+- **Batch with `UNWIND [literal IDs] AS x MATCH (n) WHERE n = x`, not `IN`.** `WHERE n IN [..]` and `WHERE id(n) IN [..]` scan every node.
+- **The batch form is fast only in one exact shape.** There is no per-row seek: the planner rewrites the UNWIND into `n = 4 OR n = 17 OR …` at plan time, and that only works when:
+  - the list is a **literal written into the query text** (build it in Python: `f"UNWIND {ids} AS x …"`), not a variable, `collect(...)`, `range(...)` or a list property;
+  - its **elements are distinct** integers, so dedupe in Python first; one repeated ID makes it fall back to a full scan;
+  - `x` is used **only** in `n = x`. Return `id(n)` instead of `x`, because `RETURN x, n.name` falls back to a full scan + cross product.
+
+  Check with `EXPLAIN`: the plan should show `const_scan_nodes`, not `scan_nodes`. A label (`MATCH (n:P) WHERE n = x`) and `SET` are fine.
+- **Get the IDs once, reuse them.** Fetch them with whatever filter you need (`MATCH (n:Person {email: 'a@x.org'}) RETURN id(n)`, or `RETURN n`), keep them in Python, and address those nodes by ID from then on.
+  - **Key lookups:** a single key lookup with a constant (`{pid: 7}`) is fine. It's per-row key lookups (`UNWIND keys … {pid: x}`, LOAD CSV joins) that are slow.
+- **Never look up nodes by IDs computed per row, and never two nodes from one row.** Forms like `WHERE a = p[0] AND b = p[1]`, `a = ss[i]`, or two MATCHes on two values from one row are not rewritten at all. They run as a **cross product of two full node scans**, which can exhaust server memory on large graphs.
+  - To pair specific nodes, put both IDs in as literals, one pair per query: `MATCH (a) WHERE a = 5 MATCH (b) WHERE b = 7`.
+  - For bulk edges, see `LOAD PARQUET` in `writing.md`.
+- **Vector search results:** `VECTOR SEARCH … YIELD ids` binds `ids` directly as nodes. Use them as is (`ids.title`, `MATCH (ids)-[...]->(...)`). Re-matching with `MATCH (n:Label) WHERE n = ids`, or joining on a property, scans the label. `ids` is a runtime column, and only literal IDs become a constant scan.
+
+**Stability.** Native IDs of existing nodes are stable across queries, change submits and server restarts, so it is safe to cache them for a working session. Two exceptions:
+- **New nodes:** nodes created in an open change get their final IDs at `COMMIT` / `CHANGE SUBMIT`. Read them after that.
+- **Compaction:** `MERGE_DATAPARTS` **renumbers** all nodes. Re-fetch any cached IDs, and rebuild vector indexes keyed by node IDs, afterwards.
+
+Keep a business key property as well, for durable identity outside TuringDB. `elementId()` does not exist. For edges, `MATCH ()-[r]->() WHERE id(r) = 0 RETURN startNode(r), endNode(r)` works.
 
 ## Variable-length paths
 
