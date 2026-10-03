@@ -131,10 +131,14 @@ client.set_graph("other_graph")   # switch graph context
 - `db.describeCommit('<hash>')` returns 0/0/0 for an unknown hash rather than an error.
 - An unknown hash passed to `checkout(commit=…)` gives `COMMIT_NOT_FOUND`.
 
-Via Cypher (REST API only; the CLI and SDK handle this automatically):
+After a server restart, past commits must be loaded before they can be read:
+- `client.checkout(commit=…)` loads the commit itself.
+- `client.set_commit(…)` does **not**: the next query fails with `COMMIT_NOT_LOADED`. Use `checkout(commit=…)`, or load it first.
+- Raw REST (`?commit=<hash>`) answers `COMMIT_NOT_LOADED` until you send:
 ```cypher
 LOAD COMMIT 'abc123'
 ```
+A browser client that time-travels should catch `COMMIT_NOT_LOADED`, send `LOAD COMMIT` (it is idempotent) and retry once.
 
 ## SDK Client Backends
 

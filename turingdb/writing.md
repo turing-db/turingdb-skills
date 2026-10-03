@@ -31,7 +31,7 @@ client.checkout()                  # REQUIRED: return the client to main
 | Earlier query in the same change did… | Visible to later queries before `COMMIT`? |
 |---|---|
 | `CREATE` nodes/edges | **No.** A later `MATCH` finds nothing. A `MATCH … CREATE` edge silently creates nothing, and `MERGE` **creates duplicates** |
-| `SET` / `REMOVE` / `DELETE` on entities that already existed | Yes, immediately |
+| `SET` / `REMOVE` / `DELETE` on entities that already existed | Yes, immediately, **except to `shortestPath`**: it does not see an uncommitted `SET` of its weight property (it does see a `DELETE`). Run `COMMIT` before routing |
 | anything, followed by `COMMIT` | Yes |
 | writes earlier in the **same query** | Yes |
 
@@ -230,7 +230,7 @@ These can be issued via `client.query()` or from the CLI:
 | `CHANGE DELETE` | Discard the current change |
 | `CHANGE LIST` | List the open change IDs for the current graph |
 | `COMMIT` | Seal pending writes inside the change. Needed before later queries in the change can MATCH/MERGE newly created entities |
-| `MERGE_DATAPARTS` | Compact the graph's accumulated DataParts into one. Run on main with **no change open on any graph** |
+| `MERGE_DATAPARTS` | Compact the graph's accumulated DataParts into one. Run on main with **no change open on any graph**. It renumbers node IDs, and it is **not persisted until another change is submitted**: a restart before that silently reverts it |
 
 ## Property Indexes
 

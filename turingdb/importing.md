@@ -187,6 +187,8 @@ Line format:
 - **Node ids:** must be numeric (an int or a digit string). Gaps are fine. Every node needs at least one label.
 - **Relationships:** each needs exactly one `label`. `start`/`end` reference node `id`s. Use the APOC object form `{"id": "..."}`. A bare integer `"end": 5` only works when node IDs have no gaps; otherwise the import fails with `unordered_map::at`.
 - **Property values:** arrays load as `List` properties. Nested objects are stored as JSON strings. ISO date strings stay strings unless declared (see below).
+- **Omit null properties; don't write `"x": null`.** A JSON `null` registers an extra String property named `x (String)` holding the text `"null"` next to the real `x`, on nodes and on edges, and it shows up in `db.propertyTypes()`. `LOAD PARQUET` handles nulls cleanly.
+- **One `NaN` rejects the whole file** (Python's `json.dumps` writes a bare `NaN` by default; pass `allow_nan=False`). The error response names only the file. The line and column are in `<turing-dir>/logs/turingdb.log`.
 
 Typed options can be chained after the graph name:
 
