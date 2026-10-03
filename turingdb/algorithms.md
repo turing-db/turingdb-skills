@@ -35,6 +35,7 @@ A join can feed an endpoint, e.g. `MATCH (x {name: 'Bromsgrove'})-[:LINK]->(a), 
 **Restrictions:**
 - **It is directed.** Only outgoing edges are followed. An unreachable target returns **zero rows**, not an error.
 - **It must be followed directly by `RETURN`.** `WITH` is not allowed after it. `ORDER BY` / `LIMIT` on the RETURN are fine.
+- **Inside a change, run `COMMIT` after changing a weight and before routing.** `shortestPath` reads the last committed weights: after an uncommitted `SET e.distance = …` it still returns the old route, even though a plain `MATCH` already shows the new value. An uncommitted edge `DELETE` is seen. This matters for what-if analysis: `new_change()` → `SET` / `DELETE` → `COMMIT` → `shortestPath` → `CHANGE DELETE`.
 - **Only `dist` and `path` can be returned.** Any other variable, including a separately matched copy of an endpoint, fails with `Cannot return a after SHORTESTPATH.` To label the route, map the IDs in `path` back to names with a second query:
 
 ```python

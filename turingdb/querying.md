@@ -76,6 +76,11 @@ Measured on a 1M-node graph (server-side time):
   - `x` is used **only** in `n = x`. Return `id(n)` instead of `x`, because `RETURN x, n.name` falls back to a full scan + cross product.
 
   Check with `EXPLAIN`: the plan should show `const_scan_nodes`, not `scan_nodes`. A label (`MATCH (n:P) WHERE n = x`) and `SET` are fine.
+- **The UNWIND batch only becomes a constant scan when the MATCH is a single node.** With a relationship in the pattern, or a second MATCH, the plan falls back to `scan_nodes_by_label`. To seed an expansion from known nodes, write the IDs as an `OR` of literals on the pattern's first node, which the planner does turn into `const_scan_nodes` (at most 255 terms):
+  ```cypher
+  MATCH (p:Person)-[:WORKS_AT]->(c:Company) WHERE p = 4 OR p = 17 RETURN p.name, c.name
+  ```
+- **Keep an UNWIND batch to at most 5,000 IDs.** Around 5,500 literals (for node IDs and for string keys alike) the rewrite recurses until the server crashes, with nothing in the log. Split larger lists, or filter with `WHERE x IN [...]`, which handled 20,000 values.
 - **Get the IDs once, reuse them.** Fetch them with whatever filter you need (`MATCH (n:Person {email: 'a@x.org'}) RETURN id(n)`, or `RETURN n`), keep them in Python, and address those nodes by ID from then on.
   - **Key lookups:** a single key lookup with a constant (`{pid: 7}`) is fine. It's per-row key lookups (`UNWIND keys … {pid: x}`, LOAD CSV joins) that are slow.
 - **Never look up nodes by IDs computed per row, and never two nodes from one row.** Forms like `WHERE a = p[0] AND b = p[1]`, `a = ss[i]`, or two MATCHes on two values from one row are not rewritten at all. They run as a **cross product of two full node scans**, which can exhaust server memory on large graphs.
@@ -85,7 +90,7 @@ Measured on a 1M-node graph (server-side time):
 
 **Stability.** Native IDs of existing nodes are stable across queries, change submits and server restarts, so it is safe to cache them for a working session. Two exceptions:
 - **New nodes:** nodes created in an open change get their final IDs at `COMMIT` / `CHANGE SUBMIT`. Read them after that.
-- **Compaction:** `MERGE_DATAPARTS` **renumbers** all nodes. Re-fetch any cached IDs, and rebuild vector indexes keyed by node IDs, afterwards.
+- **Compaction:** `MERGE_DATAPARTS` **renumbers** all nodes. Re-fetch any cached IDs, and rebuild vector indexes keyed by node IDs, afterwards. **Submit a change right after the merge:** on its own, the merge is not written to disk, so a restart silently brings back the old commit and the old IDs, and any IDs you re-fetched then point at different nodes.
 
 Keep a business key property as well, for durable identity outside TuringDB. `elementId()` does not exist. For edges, `MATCH ()-[r]->() WHERE id(r) = 0 RETURN startNode(r), endNode(r)` works.
 
@@ -182,6 +187,8 @@ MATCH (p:Person) WHERE NOT (p)-[:KNOWS]->() RETURN p.name
 - Literals: hex literals such as `0x1F` work.
 
 **Not supported:** `=~` regex and `exists(n.prop)`. Use `n.prop IS NOT NULL` instead of the latter.
+
+**At most 255 boolean terms per expression.** A `WHERE` with 256 `OR`/`AND` terms fails with `PARSE_ERROR: … Expression nested deeper than 256 levels`. For long lists of values use `IN [...]`.
 
 **Numeric type strictness.** These are deliberate and are rejected at analysis time:
 - `Integer = Double` (e.g. `n.age = 30.0`, or `n.score = 2` when `score` is a Double): error "Operands are not valid or compatible types".
@@ -404,4 +411,5 @@ To **build a graph** from CSV, see `writing.md`.
 - `Integer = Double` and `Double = Double` comparisons are rejected. Use ranges.
 - Function names are case-sensitive, and unknown property names silently read as null.
 - Keywords are case-insensitive (`MATCH` == `match`). Labels, edge types and property names are case-sensitive.
-- Only `//` starts a comment; `-- text` is parsed as part of the query. `s3` is a reserved word (S3 commands), so don't use it as a variable name.
+- Only `//` starts a comment; `-- text` is parsed as part of the query.
+- `s3`, `index`, `graph` and `from` are reserved words, as variable names and as property names (`n.index`, `{from: 1}` are parse errors). Escape them with backticks: ``n.`index` ``.
