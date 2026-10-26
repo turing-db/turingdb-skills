@@ -49,7 +49,7 @@ Use the **server** (`json`) by default. If the server was started with `-auth-on
 - **Bulk data: `LOAD PARQUET` builds graphs, ID-pair `UNWIND` adds edges.**
   - **New graph:** above roughly 5,000 nodes or 1,000 edges, write the data to Parquet and run `LOAD PARQUET`. It builds a new graph in well under a second (see `importing.md`).
   - **Edges between existing nodes:** batch **native node ID pairs** into one `UNWIND`: `UNWIND [[12, 34], …] AS p MATCH (a) WHERE a = p[0] MATCH (b) WHERE b = p[1] CREATE (a)-[:R]->(b)`. That creates 10,000 edges in about 45 ms (see `writing.md`).
-  - **Never** match edge endpoints by a key property per row (`{pid: p[0]}`). Each row scans the whole label, so 1,000 pairs take about 7.5 s on 200k nodes (TUR-338).
+  - **Never** match edge endpoints by a key property per row (`{pid: p[0]}`). Each row scans the whole label, so 1,000 pairs take about 7.5 s on 200k nodes.
   - **Embeddings for existing nodes:** use `LOAD EMBEDDING` from a Parquet file, not `SET` loops (see `algorithms.md`).
 - **Writes need a change.** Run them as: `client.new_change()` → writes → `CHANGE SUBMIT` → `client.checkout()`. Inside a change, nodes created by an earlier query are invisible to a later **MATCH** until you run `COMMIT`. MERGE does see them. See `writing.md`.
 - **Address known nodes by native node ID:** `MATCH (n) WHERE n = 123` (or `id(n) = 123`) is a constant scan of exactly that node.
