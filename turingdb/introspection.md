@@ -27,10 +27,17 @@ MATCH (n:Person) RETURN n.name, n.age LIMIT 5                                   
 MATCH (n:Person) RETURN count(n.email) AS withEmail, count(*) AS total              // property coverage
 ```
 
-`RETURN n` gives only an internal ID, and there is no `properties(n)`. To see every property of a few nodes, use `db.getNodes`, which returns `properties` as a JSON string:
+`RETURN n` gives only an internal ID. To see every property of some nodes, return `properties(n)`, which comes back as a Python dict:
 
 ```cypher
-CALL db.getNodes([0, 1, 2]) YIELD id, labels, properties RETURN id, labels, properties
+MATCH (n:Person) RETURN id(n), labels(n), properties(n) LIMIT 5
+MATCH (n:Person) UNWIND keys(n) AS k RETURN k, count(*) AS n ORDER BY n DESC            // property coverage per key
+```
+
+The procedures `db.getNodes` and `db.listNodes` also return properties, as a **JSON string**, plus edge counts. `db.listNodes` adds a case-insensitive substring search:
+
+```cypher
+CALL db.getNodes([0, 1, 2]) YIELD id, labels, inEdgeCount, outEdgeCount, properties
 CALL db.listNodes(["Person"], {name: "ali"}, 0, 10) YIELD id, labels, properties     // case-insensitive substring search
 ```
 
@@ -71,7 +78,7 @@ MATCH (n:Station {name: 'Pershore'}) CALL gnn.neighbourhoodSample(n, 5) YIELD sr
 ```
 
 **Gotchas:**
-- **Constant arguments only.** A procedure argument can't read row values (`db.getNodes([id(n)])` fails with "must be constant").
+- **Constant arguments only.** A procedure argument can't read row values: `db.getNodes([id(n)])` fails with "Argument 'nodeIDs' of 'db.getNodes' must be constant, so it cannot read a row". The exception is a NODE argument such as the `node` of `gnn.neighbourhoodSample`.
 - **`valueType` has its own enum type.** `WHERE valueType = 'String'` is rejected, so filter the DataFrame in pandas instead.
 - **`commit` is a keyword.** Yield it with backticks: ``CALL db.history() YIELD `commit` ``.
 - **No `OPTIONAL CALL`** on procedures.
@@ -93,12 +100,14 @@ The `greeter` example ships with the pip wheel. Extensions are looked up in `<in
 
 ```cypher
 LIST GRAPH              // graphs currently LOADED in the server (graphName)
-LIST AVAILABLE GRAPHS   // graphs on disk (graphName, isLoaded, isLoading)
+LIST AVAILABLE GRAPHS   // graphs on disk, plus in-memory and still-loading ones (graphName, isLoaded, isLoading)
 CREATE GRAPH g          // new empty graph
 LOAD GRAPH g            // load an on-disk graph
 CHANGE LIST             // open changes on the current graph
-EXPLAIN <query>         // show the compiled plan without running it
+EXPLAIN <query>         // show the compiled plan without running it; EXPLAIN (db) <query> for the db stage only
 ```
+
+A query on a graph that isn't loaded fails with `GRAPH_NOT_FOUND`, and the details name the graph.
 
 ```python
 client.list_available_graphs()  # → list[str]  (json/HTTP backend only)
@@ -129,7 +138,7 @@ client.set_graph("other_graph")   # switch graph context
 - `nodeCount` / `edgeCount` count what **that commit's data part** added. They are not graph totals.
 - Use hashes exactly as printed. They are not zero-padded.
 - `db.describeCommit('<hash>')` returns 0/0/0 for an unknown hash rather than an error.
-- An unknown hash passed to `checkout(commit=…)` gives `COMMIT_NOT_FOUND`.
+- An unknown hash passed to `checkout(commit=…)` gives `COMMIT_NOT_FOUND: Commit '<hash>' does not exist`.
 
 Via Cypher (REST API only; the CLI and SDK handle this automatically):
 ```cypher
@@ -166,9 +175,10 @@ client = TuringDB(type="embedded", data_dir="/path/to/.turing")   # omit data_di
 # Construction
 TuringDB(type=None, host=..., data_dir=..., port=None, token=None)   # type: "json"|"native"|"embedded"
 
-# Query execution (no parameters argument — inline literals into the string)
-client.query(q: str) -> pandas.DataFrame                 # parsed, typed DataFrame
-client.query_raw(q: str) -> dict                         # raw server response
+# Query execution. query_parameters only fill label / edge-type parameters ($lbl);
+# values must still be inlined as literals into the string
+client.query(q: str, query_parameters: dict | None = None) -> pandas.DataFrame   # parsed, typed DataFrame
+client.query_raw(q: str, query_parameters: dict | None = None) -> dict           # raw server response
 
 # Graph management
 client.list_available_graphs() -> list[str]              # json backend only
@@ -182,7 +192,7 @@ client.set_graph(graph_name: str)
 # Change workflow
 client.new_change() -> int                               # CHANGE NEW; ALSO switches the client onto it
 client.checkout(change: int | "main" = "main", commit: str = "HEAD")   # call after CHANGE SUBMIT
-client.set_change(change: int | str)                     # int or hex string
+client.set_change(change: int | str)                     # int or decimal string, as CHANGE NEW returns it
 client.set_commit(commit: str)
 # There is no submit() method: submit via client.query("CHANGE SUBMIT"), then client.checkout()
 
@@ -205,14 +215,17 @@ client.current_change       # "main" by default
 
 ### Result types in the DataFrame
 
-- **Nodes and edges** (`RETURN n`, `RETURN r`) come back as integer IDs (`UInt64`). Project properties explicitly.
+- **Nodes and edges** (`RETURN n`, `RETURN r`) come back as integer IDs (`UInt64`), and as null when an OPTIONAL MATCH didn't match. Project properties explicitly, or return `properties(n)` (a dict).
 - **Scalars:** strings → `string`, Int64 / UInt64 → nullable `Int64` / `UInt64`, Double → `float64`, Bool → `boolean`.
 - **Temporal:** DateTime → `datetime64[us, UTC]`, Duration → `timedelta64[us]`.
 - **Collections:** lists → Python lists, maps → dicts. Embeddings → lists over HTTP, numpy float32 arrays over native/embedded.
 - **Paths:** a named path `p` → a list of `{'type': 'node'|'edge', 'id': …}` dicts. A `shortestPath` `path` → a flat list of alternating node/edge IDs.
-- **Precision:** over HTTP, doubles are serialized with 6 decimal places.
+- **Precision:** doubles keep full precision over every backend. NaN and ±Infinity come back as float `nan` / `inf`.
+- **Integer columns are numpy-backed.** Values pulled out of a DataFrame (`df["id"].iloc[0]`, `itertuples()`) are `np.int64`, which an f-string prints as `np.int64(5)`. Convert with `.tolist()` or `int()` before inlining IDs into a query.
 
 ### Errors
 
-- **Query errors** raise `TuringDBException("<CODE>: <details>")`, where `CODE` is one of `PARSE_ERROR`, `ANALYZE_ERROR`, `PLAN_ERROR`, `EXEC_ERROR`, `CHANGE_NOT_FOUND`, `COMMIT_NOT_FOUND`, …. The details include a caret pointing at the offending part of the query.
+- **Query errors** raise `TuringDBException("<CODE>: <details>")`.
+  - **Codes:** `PARSE_ERROR`, `ANALYZE_ERROR`, `PLAN_ERROR`, `EXEC_ERROR`, `GRAPH_NOT_FOUND`, `CHANGE_NOT_FOUND`, `COMMIT_NOT_FOUND`, `REQUEST_TOO_BIG`, ….
+  - **Details:** for query errors they include a caret pointing at the offending part of the query. For the `*_NOT_FOUND` codes they name the missing graph, change or commit.
 - **On the json backend, transport failures** (server down, HTTP 401 for a bad or missing token) surface as `httpx` exceptions instead.

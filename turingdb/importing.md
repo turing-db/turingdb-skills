@@ -9,7 +9,7 @@ These commands build graph data from external files. To load an existing on-disk
 
 External files must live in the **`data/` subdirectory** of the TuringDB working directory (`-turing-dir`, default `~/.turing`). Paths in these commands are resolved inside `data/`; even an absolute path is re-rooted there. All of the `LOAD …` commands are engine commands, so run them via `client.query(...)`. When an import fails, the details are written to `<turing-dir>/logs/turingdb.log`.
 
-> **Choosing a method by volume:** above roughly 5,000 nodes or 1,000 edges, **use `LOAD PARQUET`**, converting the source to Parquet first if needed. It loads 100k nodes + 200k edges in about 0.2 s. Cypher-driven loads (LOAD CSV/UNWIND + MATCH + CREATE) need minutes for a few thousand edges and do not finish at that size. Convert CSV, JSON or DataFrames to the `__id`/`__labels` Parquet schema with pandas/pyarrow rather than streaming them through Cypher. Keep `LOAD CSV` for small files and incremental additions to an existing graph.
+> **Choosing a method by volume:** above roughly 5,000 nodes or 1,000 edges, **use `LOAD PARQUET`**, converting the source to Parquet first if needed. It loads 100k nodes + 200k edges in about 0.2 s. Cypher-driven loads that match edge endpoints by key property (LOAD CSV/UNWIND + `MATCH (a {pid: …})` + CREATE) need minutes for a few thousand edges and do not finish at that size. Convert CSV, JSON or DataFrames to the `__id`/`__labels` Parquet schema with pandas/pyarrow rather than streaming them through Cypher. Keep `LOAD CSV` for small files. To add many edges to an existing graph, batch them as native node ID pairs (see `writing.md`).
 
 | Source | Command | Creates |
 |--------|---------|---------|
@@ -185,8 +185,9 @@ Line format:
 ```
 
 - **Node ids:** must be numeric (an int or a digit string). Gaps are fine. Every node needs at least one label.
-- **Relationships:** each needs exactly one `label`. `start`/`end` reference node `id`s. Use the APOC object form `{"id": "..."}`. A bare integer `"end": 5` only works when node IDs have no gaps; otherwise the import fails with `unordered_map::at`.
-- **Property values:** arrays load as `List` properties. Nested objects are stored as JSON strings. ISO date strings stay strings unless declared (see below).
+- **Relationships:** each needs exactly one `label`. `start`/`end` reference node `id`s, either in the APOC object form `{"id": "..."}` or as a bare integer (`"end": 25`).
+- **Property values:** arrays load as `List` properties. Nested objects are stored as JSON strings. A JSON `null` leaves the property unset. ISO date strings stay strings unless declared (see below).
+- **Errors:** a malformed line fails the load with the line number and the parser's message, e.g. `JSONL error 'JSONL parse' at line 2: … syntax error while parsing object`.
 
 Typed options can be chained after the graph name:
 
@@ -228,7 +229,10 @@ client.query("LOAD JSONL 'output.json' AS mygraph")
 
 (Neo4j 4.x databases must be migrated to the 5.x format with `neo4j-admin database migrate` before exporting.)
 
-Most Neo4j read queries port directly to TuringDB v3. Review them for the differences listed in `SKILL.md`: no parameters, no string/math functions, no map projection, and the different shortest-path syntax.
+Most Neo4j read queries port directly to TuringDB v3. Review them for the differences listed in `SKILL.md`:
+- **Parameters:** `$params` work only as labels and edge types, so inline values.
+- **Maps and functions:** there is no map projection, no regex, and no `rand()` / `date()` / `elementId()`.
+- **Shortest path:** the syntax is different (see `algorithms.md`).
 
 ## After importing
 
