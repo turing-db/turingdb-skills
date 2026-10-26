@@ -177,7 +177,7 @@ MATCH (n:Person {name: 'Alice'}) RETURN n NEXT WHEN n.age > 18 THEN CREATE (:Adu
 | **Edges between existing nodes** | `UNWIND` of native node ID pairs, about 10,000 pairs per query (below) | 10,000 edges in **45 ms** on a 200k-node graph |
 | **Embeddings** for existing nodes | `LOAD EMBEDDING` (see `algorithms.md`) | 20,000 × 384-d in 0.1 s |
 | A few thousand new nodes | `UNWIND` over an inlined list | 100k nodes in 0.2 s |
-| Edges by **key property** (`MATCH (a:P {pid: row.src})`) | **avoid**: map keys to native IDs first | 1,000 edges take about 7.5 s on 200k nodes: each row scans the label once per endpoint, index or not (TUR-338) |
+| Edges by **key property** (`MATCH (a:P {pid: row.src})`) | **avoid**: map keys to native IDs first | 1,000 edges take about 7.5 s on 200k nodes: each row scans the label once per endpoint, index or not |
 
 `LOAD PARQUET` always creates a **new graph**; it cannot append to an existing one. To add a large volume of nodes to an existing graph, create them with `UNWIND`, then `COMMIT`, read back their native IDs, and add their edges by ID pairs.
 
