@@ -40,12 +40,14 @@ A join can feed an endpoint, e.g. `MATCH (x {name: 'Bromsgrove'})-[:LINK]->(a), 
 ```python
 row = client.query("MATCH (a:Station {name:'A'}), (b:Station {name:'B'}) "
                    "shortestPath(a, b, distance, dist, path) RETURN dist, path").iloc[0]
-node_ids = sorted({int(i) for i in row["path"][0::2]})   # even positions are nodes; distinct
-names = client.query(f"UNWIND {node_ids} AS x MATCH (n) WHERE n = x RETURN id(n) AS id, n.name AS name")
-# literal list of distinct IDs, x not returned, so this is a constant scan
+node_ids = [int(i) for i in row["path"][0::2]]          # even positions are nodes, source → target
+names = client.query(f"UNWIND {node_ids} AS x MATCH (n) WHERE n = x RETURN x AS id, n.name AS name")
+# one direct fetch per ID; reorder by node_ids if the row order matters
 ```
 
-- **Don't call path functions on its output.** `nodes(path)`, `length(path)` and comprehensions over `path` are not supported.
+- **Path functions return IDs only, target first.** `length(path)`, `nodes(path)` and `relationships(path)` can be returned, but:
+  - `nodes(path)` and `relationships(path)` list the route **from the target back to the source**. For A→B→C they give `[C, B, A]`, while `path` itself runs `[A, e1, B, e2, C]`.
+  - You can't read properties through them in the same query: `[n IN nodes(path) | n.name]` fails with `Cannot return n after SHORTESTPATH.` Map the IDs back with a second query, as above.
 - **The Neo4j/GQL forms are not supported.** `shortestPath((a)-[*]-(b))`, `allShortestPaths(...)`, `ANY SHORTEST` and `SHORTEST k` are all parse errors.
 
 ## Path finding with variable-length patterns
@@ -60,10 +62,9 @@ ORDER BY hops LIMIT 1
 
 // Weighted route, keeping the names along it (enumerates paths: bound the length):
 MATCH p = (a:Station {name: 'Ashchurch'})-[:LINK*1..6]->(b:Station {name: 'Worcester Shrub Hill'})
-WITH [n IN nodes(p) | n.name] AS route, [r IN relationships(p) | r.distance] AS ds
-UNWIND ds AS d
-WITH route, sum(d) AS total
-RETURN route, total ORDER BY total LIMIT 1
+RETURN [n IN nodes(p) | n.name] AS route,
+       reduce(t = 0, r IN relationships(p) | t + r.distance) AS total
+ORDER BY total LIMIT 1
 
 // Reachability / k-hop neighbourhood:
 MATCH (a:Person {name: 'Alice'})-[:KNOWS]-{1,3}(b) RETURN DISTINCT b.name
@@ -72,7 +73,7 @@ MATCH (a:Person {name: 'Alice'})-[:KNOWS]->+(b) RETURN count(DISTINCT b)
 
 - **Paths are enumerated, not searched.** Variable-length matching lists every trail (no repeated edge), which can be expensive on dense graphs. Always bound the length (`*1..6`, `{1,6}`), and prefer the `shortestPath` statement for weighted shortest paths on large graphs.
 - **Per-hop filters:** `-[e:LINK WHERE e.distance < 12]->+`, or a quantified pattern `((x)-[e:LINK]->(y) WHERE …){1,4}`.
-- **Summing edge properties:** sum relationship properties via `[r IN relationships(p) | r.prop]` + `UNWIND` as above. `UNWIND relationships(p) AS r … sum(r.prop)` fails with an EXEC_ERROR.
+- **Summing edge properties:** per path, use `reduce(t = 0, r IN relationships(p) | t + r.distance)` as above. To sum over all matched paths, use `UNWIND relationships(p) AS r … sum(r.distance)`.
 
 ---
 
@@ -81,6 +82,7 @@ MATCH (a:Person {name: 'Alice'})-[:KNOWS]->+(b) RETURN count(DISTINCT b)
 TuringDB has a built-in k-nearest-neighbour vector index over high-dimensional embeddings.
 - **Scope:** the index lives at the TuringDB root (`<turing-dir>/vector/`), independent of graphs and versioning. One index can serve searches across multiple graphs and commits, and it persists across restarts.
 - **Contents:** each vector is stored with a numeric ID, normally the TuringDB node ID.
+- **Memory:** HNSW index files are memory-mapped rather than read into RAM. Start the server with `-no-vector-mmap` to load them into memory instead. A server that adds vectors to an index reads that index in anyway.
 
 > **Embedding literals use parentheses `( )`, not brackets.** `(1.2, 2.0, 0.0)` is an embedding; `[1.2, 2.0, 0.0]` is a list literal (a different type). Embedding literals require at least 2 numeric items.
 
@@ -105,7 +107,7 @@ Vectors are loaded from a header-less CSV in the `data/` directory. Each line is
 LOAD VECTOR FROM "vectors.csv" IN my_index
 ```
 
-To build that file from the graph, export `id(n)` alongside your embeddings, e.g. `MATCH (d:Document) RETURN id(d) AS id, d.text`, embed the text in Python, and write the CSV.
+To build that file from the graph, export `id(n)` alongside your embeddings, e.g. `MATCH (d:Document) RETURN id(d) AS id, d.text`, embed the text in Python, and write the CSV. Loading a file again with IDs that are already in the index **replaces** those vectors rather than duplicating them.
 
 ### Search
 
@@ -122,7 +124,7 @@ WHERE score > 0.8
 MATCH (doc)-[:ABOUT]->(t:Topic)
 RETURN doc.title, t.name, score
 
-// Slower: re-matching the node scans the label and cross-joins it with the results
+// Also fine: re-matching fetches the hits directly and keeps those with the label
 VECTOR SEARCH IN my_index FOR 5 (1.2, 0.5, 3.0, 0.1) YIELD ids
 MATCH (n:Document) WHERE n = ids
 RETURN n.title
@@ -130,7 +132,8 @@ RETURN n.title
 
 - **Syntax:** `VECTOR SEARCH IN <index> FOR <k> (<vector>) YIELD ids [AS x][, score [AS s]]`.
 - **The query vector's dimension must match the index.** A mismatch is an error.
-- **Key the vector file by native node IDs, and use `ids` directly.** `ids` is then the node itself, so `ids.title` and `MATCH (ids)-[...]->(...)` read and expand it without any lookup. Don't re-match it with `MATCH (n:Document) WHERE n = ids` (label scan + cross product), and don't key the file by your own IDs, because joining them back through a property (`WHERE n.doc_id = ids`) is a label scan as well.
+- **Key the vector file by native node IDs, and use `ids` directly.** `ids` is then the node itself, so `ids.title` and `MATCH (ids)-[...]->(...)` read and expand it without any lookup. Re-matching with `MATCH (n:Document) WHERE n = ids` is a direct fetch plus a label check, so it is fine for filtering by label.
+- **Don't key the file by your own IDs.** Joining them back through a property (`WHERE n.doc_id = ids`) scans the label.
 - **After `MERGE_DATAPARTS`**, which renumbers nodes, rebuild a node-ID-keyed vector index.
 - In the result DataFrame, `ids` is UInt64.
 

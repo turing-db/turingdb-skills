@@ -2,7 +2,7 @@
 
 Claude Code skills that teach agents how to start, query, and manage [TuringDB](https://docs.turingdb.ai/) graph databases.
 
-Targets **TuringDB v3** (`turingdb>=3.0` on PyPI). v3 runs every query on the new engine and supports most of openCypher. The skill documents what works, what doesn't, and where TuringDB differs from Neo4j Cypher.
+Targets **TuringDB v3** (`turingdb>=3.0.2` on PyPI). v3 runs every query on the new engine and supports most of openCypher. The skill documents what works, what doesn't, and where TuringDB differs from Neo4j Cypher.
 
 ## What's included
 
@@ -10,8 +10,8 @@ Targets **TuringDB v3** (`turingdb>=3.0` on PyPI). v3 runs every query on the ne
 |------|--------|
 | `SKILL.md` | Entry point — key differences from Neo4j Cypher, then routes to the right reference based on your task |
 | `startup.md` | Install the package, start/stop a server, connect (HTTP, auth token, embedded), load/create a graph |
-| `querying.md` | MATCH/OPTIONAL MATCH, variable-length and quantified paths, WITH, aggregation, UNWIND, subqueries, functions, LOAD CSV, result types |
-| `writing.md` | CREATE, MERGE, SET, REMOVE, DETACH DELETE, bulk writes, indexes, and the change/commit workflow |
+| `querying.md` | MATCH/OPTIONAL MATCH, label expressions, variable-length and quantified paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps, subqueries, functions, parameters, LOAD CSV, result types |
+| `writing.md` | CREATE, MERGE, SET, REMOVE, DETACH DELETE, FOREACH, bulk writes (edges by native ID pairs), indexes, and the change/commit workflow |
 | `importing.md` | Import external data — CSV, Parquet (`LOAD PARQUET`, `turing-parquet`), JSONL, GML, Neo4j migration |
 | `algorithms.md` | Shortest path, path finding with variable-length patterns, vector/embedding search, GNN sampling |
 | `introspection.md` | Explore schema, procedures, versioning, time travel, SDK reference |

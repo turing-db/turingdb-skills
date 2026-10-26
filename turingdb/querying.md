@@ -1,6 +1,6 @@
 ---
 name: turingdb-querying
-description: Use when reading data from TuringDB v3 — MATCH/OPTIONAL MATCH patterns, variable-length and quantified paths, WHERE, WITH, aggregation, UNWIND, lists, CASE, EXISTS/COUNT/CALL subqueries, UNION, built-in functions, LOAD CSV, and result types. Does not cover writes (see writing.md) or shortest path / vector search (see algorithms.md).
+description: Use when reading data from TuringDB v3 — MATCH/OPTIONAL MATCH patterns, label expressions, variable-length and quantified paths, WHERE, WITH, NEXT, WHEN conditional queries, aggregation, UNWIND, lists, maps, CASE, reduce, EXISTS/COUNT/COLLECT/CALL subqueries, UNION, built-in functions, label/edge-type parameters, LOAD CSV, and result types. Does not cover writes (see writing.md) or shortest path / vector search (see algorithms.md).
 ---
 
 # TuringDB: Querying
@@ -12,8 +12,8 @@ df = client.query("MATCH (n:Person) RETURN n.name, n.age")
 ```
 
 **Before writing queries, know these limits:**
-- **No parameters.** `$name` is a parse error and `query()` takes only a string, so build the query text with inlined literals and escape quotes yourself.
-- **One statement per request.** `;` chaining is rejected (a single trailing `;` is fine).
+- **Parameters only name labels and edge types** (see Parameters below). A `$name` used as a value fails with "Not implemented: Parameters", so build the query text with inlined literals and escape quotes yourself.
+- **One statement per request.** `;` chaining is rejected with "Multiple queries not yet supported" (a single trailing `;` is fine). To run steps in order within one request, use `NEXT` (below).
 - **Comments:** `//` line comments work. SQL-style `--` comments and `/* */` comments do not.
 
 ## MATCH
@@ -22,19 +22,46 @@ df = client.query("MATCH (n:Person) RETURN n.name, n.age")
 MATCH (n) RETURN count(n)
 MATCH (n:Person) RETURN n.name, n.age
 MATCH (n:Person {name: 'Alice', age: 30}) RETURN n.name            // inline property map
-MATCH (n:Person:Employee) RETURN n.name                           // has BOTH labels
+MATCH (n:Person:Employee) RETURN n.name                           // has BOTH labels (same as :Person&Employee)
 MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name
 MATCH (a)-[e:KNOWS {since: 2010}]->(b) RETURN a.name, e.since, b.name
 MATCH (a)<-[e]-(b) RETURN a.name, b.name                          // reverse direction
-MATCH (a)-[e]-(b) RETURN a.name, b.name                           // undirected (also --)
-MATCH (a)-[r:KNOWS|WORKS_AT]->(b) RETURN a.name, type(r), b.name  // edge type alternatives
+MATCH (a)-[e]-(b) RETURN a.name, b.name                           // undirected (also --, <-[e]->, <-->)
+MATCH (a)-[r:KNOWS|WORKS_AT]->(b) RETURN a.name, type(r), b.name  // edge type alternatives (also :KNOWS|:WORKS_AT)
 MATCH (a:Person WHERE a.age > 30)-[r:KNOWS WHERE r.since > 2015]->(b) RETURN b.name  // inline WHERE (variable must be named)
 MATCH (a {name: 'Alice'}) MATCH (a)-[:KNOWS]->(b) RETURN b.name   // multiple MATCH clauses
 MATCH (n:Person) ORDER BY n.age LIMIT 2 RETURN n.name             // TuringDB extension: ORDER BY/SKIP/LIMIT on MATCH
 ```
 
-- **Node label alternatives** (`(n:A|B)`, `(n:!A)`, `(n:A&B)`) are **not** supported. Write `WHERE n:A OR n:B` / `WHERE NOT n:A`.
+**Label expressions** work on nodes and edges, in patterns and in WHERE:
+
+```cypher
+MATCH (n:Person|Company) RETURN n.name                  // either label
+MATCH (n:!Person) RETURN n.name                         // any label but Person
+MATCH (n:Person&Employee) RETURN n.name                 // both labels
+MATCH (n:(Person&!Employee)|Company) RETURN n.name      // nested, with parentheses
+MATCH (n) WHERE n:Person|Company RETURN n.name          // in WHERE
+MATCH (a)-[r:!KNOWS]->(b) RETURN type(r), count(*)      // any edge type but KNOWS
+```
+
+- **No wildcard:** the label wildcard `:%` is a parse error.
+- **Write patterns:** in CREATE and MERGE, labels can only be joined by `:` or `&`.
 - **Unknown labels and properties don't error.** A label that doesn't exist matches nothing, and a misspelled property silently reads as null.
+
+### Parameters (labels and edge types only)
+
+`client.query(query, query_parameters)` takes a dict of parameters. The server accepts a `$name` (or a numbered `$0`) **only where a label or an edge type goes**: in MATCH, CREATE and MERGE patterns and in label expressions.
+
+```python
+client.query("MATCH (n:$lbl) RETURN n.name", {"lbl": "Person"})
+client.query("MATCH (n:$lbls) RETURN n.name", {"lbls": ["Person", "Employee"]})   # a list means every label
+client.query("MATCH (a)-[r:$t]->(b) RETURN a.name, b.name", {"t": "WORKS_AT"})
+client.query("MATCH (n:Person|$other) RETURN n.name", {"other": "Company"})
+```
+
+- **No value parameters:** `WHERE n.name = $name`, `{name: $name}`, `SET n.x = $v` and `RETURN $x` all fail with "Not implemented: Parameters". Inline values as literals.
+- **Undefined parameters** fail at run time with `Parameter $lbl is not defined`.
+- **Values:** a label or edge-type parameter holds a string, or a list of strings to require several labels.
 
 ### OPTIONAL MATCH
 
@@ -43,45 +70,41 @@ MATCH (a:Person) OPTIONAL MATCH (a)-[:WORKS_AT]->(c:Company) RETURN a.name, c.na
 MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, count(b)            // 0 for no match
 ```
 
-The WHERE of an OPTIONAL MATCH belongs to the optional part, so rows are kept, as in Neo4j.
-
-**Gotcha:** an unmatched optional **node** returned bare (`RETURN c`) shows `18446744073709551615` (UINT64_MAX) rather than null. Properties (`c.name`) and `id(c)` are correctly null.
+The WHERE of an OPTIONAL MATCH belongs to the optional part, so rows are kept, as in Neo4j. An unmatched node or edge returned bare (`RETURN c`) is null.
 
 ### Addressing nodes by native node ID (the fast path)
 
-Every node has a native node ID: the integer you get from `RETURN n` or `id(n)`. **Whenever you already know which node(s) you want, address them by comparing the node variable itself with the native ID, written as a literal in the query: `WHERE n = <id>`.** The planner turns that into a constant scan of exactly those nodes (`const_scan_nodes`). Don't look them up again through a user-level key property such as `n.pid`, `n.uuid` or `n.doc_id`.
+Every node has a native node ID: the integer you get from `RETURN n` or `id(n)`. **Whenever you already know which node(s) you want, address them by native ID: `WHERE n = <id>` (or `WHERE id(n) = <id>`).**
+- **How it runs:** a literal ID becomes a constant scan of exactly that node (`const_scan_nodes`), and IDs read from a row are fetched directly (`fetch_nodes`).
+- **Don't re-look them up** through a user-level key property such as `n.pid`, `n.uuid` or `n.doc_id`.
 
 ```cypher
-MATCH (n) WHERE n = 4 RETURN n.name                                   // direct seek
+MATCH (n) WHERE n = 4 RETURN n.name                                   // direct seek (id(n) = 4 is the same)
 MATCH (n)-[:KNOWS]->(m) WHERE n = 4 RETURN m.name                     // seek, then expand
-UNWIND [4, 17, 42] AS x MATCH (n) WHERE n = x RETURN n.name           // batch: folded into one constant scan
+UNWIND [4, 17, 42] AS x MATCH (n) WHERE n = x RETURN x, n.name        // batch: one direct fetch per ID
 UNWIND [4, 17, 42] AS x MATCH (n) WHERE n = x SET n.flag = true       // batch write by ID (inside a change)
+UNWIND [[4, 17], [42, 8]] AS p MATCH (a) WHERE a = p[0] MATCH (b) WHERE b = p[1] RETURN a.name, b.name   // two nodes per row
 ```
 
-Measured on a 1M-node graph (server-side time):
+Measured on a 200k-node, 400k-edge graph (server-side time):
 
 | Lookup | Time |
 |---|---|
-| `WHERE n = <id>` | **0.16 ms** (constant scan) |
-| `WHERE id(n) = <id>` | 1.4 ms (full node scan; grows with graph size) |
-| `UNWIND [<1,000 literal IDs>] AS x` + `WHERE n = x` | **1.4 ms total (≈1.4 µs per node)** |
-| `UNWIND` keys + `MATCH (n:P {pid: x})` | ≈1.1 ms **per node**, index or not (≈800× slower) |
+| `WHERE n = <id>` or `WHERE id(n) = <id>` | **0.14 ms** (constant scan) |
+| `UNWIND <1,000 IDs> AS x` + `WHERE n = x` | **≈3 ms total (≈3 µs per node)**, whatever the list source |
+| `UNWIND <10 ID pairs> AS p` + `a = p[0]`, `b = p[1]` | 0.3 ms |
+| `WHERE n IN [<10 IDs>]` | 3.8 ms (full node scan; grows with graph size) |
+| `UNWIND <1,000 keys> AS x` + `MATCH (n:P {pid: x})` | ≈290 ms (≈0.3 ms **per node**, ≈100× slower) |
 
 **Rules:**
-- **Compare the variable, not the function.** `WHERE n = 123` seeks, but `WHERE id(n) = 123` scans every node. Use `id(n)` only to *return* the ID.
-- **Batch with `UNWIND [literal IDs] AS x MATCH (n) WHERE n = x`, not `IN`.** `WHERE n IN [..]` and `WHERE id(n) IN [..]` scan every node.
-- **The batch form is fast only in one exact shape.** There is no per-row seek: the planner rewrites the UNWIND into `n = 4 OR n = 17 OR …` at plan time, and that only works when:
-  - the list is a **literal written into the query text** (build it in Python: `f"UNWIND {ids} AS x …"`), not a variable, `collect(...)`, `range(...)` or a list property;
-  - its **elements are distinct** integers, so dedupe in Python first; one repeated ID makes it fall back to a full scan;
-  - `x` is used **only** in `n = x`. Return `id(n)` instead of `x`, because `RETURN x, n.name` falls back to a full scan + cross product.
-
-  Check with `EXPLAIN`: the plan should show `const_scan_nodes`, not `scan_nodes`. A label (`MATCH (n:P) WHERE n = x`) and `SET` are fine.
+- **Batch with `UNWIND <IDs> AS x MATCH (n) WHERE n = x`, not `IN`.** `WHERE n IN [..]` and `WHERE id(n) IN [..]` scan every node.
+- **Any list source works.** A literal list, a `WITH` variable, `collect(id(n))`, `range(...)`, duplicates, returning `x`, a label on `n`, and an expansion after the match all keep the direct fetch.
+  - **IDs computed per row are fine too:** `a = p[0] AND b = p[1]`, or two MATCHes on two values of one row.
+  - **Check with `EXPLAIN (db)`:** the plan should show `const_scan_nodes` or `fetch_nodes`, not `scan_nodes` followed by a filter, and no `cross_product`.
 - **Get the IDs once, reuse them.** Fetch them with whatever filter you need (`MATCH (n:Person {email: 'a@x.org'}) RETURN id(n)`, or `RETURN n`), keep them in Python, and address those nodes by ID from then on.
   - **Key lookups:** a single key lookup with a constant (`{pid: 7}`) is fine. It's per-row key lookups (`UNWIND keys … {pid: x}`, LOAD CSV joins) that are slow.
-- **Never look up nodes by IDs computed per row, and never two nodes from one row.** Forms like `WHERE a = p[0] AND b = p[1]`, `a = ss[i]`, or two MATCHes on two values from one row are not rewritten at all. They run as a **cross product of two full node scans**, which can exhaust server memory on large graphs.
-  - To pair specific nodes, put both IDs in as literals, one pair per query: `MATCH (a) WHERE a = 5 MATCH (b) WHERE b = 7`.
-  - For bulk edges, see `LOAD PARQUET` in `writing.md`.
-- **Vector search results:** `VECTOR SEARCH … YIELD ids` binds `ids` directly as nodes. Use them as is (`ids.title`, `MATCH (ids)-[...]->(...)`). Re-matching with `MATCH (n:Label) WHERE n = ids`, or joining on a property, scans the label. `ids` is a runtime column, and only literal IDs become a constant scan.
+  - **Never match two nodes per row by key property** (`MATCH (a:P {pid: p[0]}) MATCH (b:P {pid: p[1]})`). That still plans as a **cross product of label scans** and can exhaust server memory. Map the keys to native IDs first.
+- **Vector search results:** `VECTOR SEARCH … YIELD ids` binds `ids` directly as nodes. Use them as is (`ids.title`, `MATCH (ids)-[...]->(...)`). Re-matching with `MATCH (n:Label) WHERE n = ids` is also a direct fetch now; use it only to keep the hits that carry a label.
 
 **Stability.** Native IDs of existing nodes are stable across queries, change submits and server restarts, so it is safe to cache them for a working session. Two exceptions:
 - **New nodes:** nodes created in an open change get their final IDs at `COMMIT` / `CHANGE SUBMIT`. Read them after that.
@@ -107,23 +130,27 @@ MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b) RETURN DISTINCT b.name
 MATCH (a)-[:KNOWS|WORKS_AT]->{1,2}(b) RETURN a.name, b.name             // type alternatives
 MATCH (a)-[e:KNOWS WHERE e.since > 2012]->+(b) RETURN a.name, b.name    // predicate on every hop
 MATCH (a)-[:KNOWS*1..3 {since: 2010}]->(b) RETURN b.name                // property map on every hop
-MATCH (a {name: 'Alice'})-[e:KNOWS]->+(b) RETURN b.name, size(e)        // e = list of edge IDs
+MATCH (a {name: 'Alice'})-[e:KNOWS]->+(b) RETURN b.name, size(e)        // e = list of edges
+MATCH (a {name: 'Alice'})-[e:KNOWS]->+(b) RETURN b.name, [r IN e | r.since] AS sinces   // edge properties along the path
 ```
 
 - **Trail semantics:** an edge never repeats within one path, but nodes may. Each distinct path is its own row, so use `DISTINCT` or aggregation to collapse them.
 - **One quantifier per edge.** You can't combine `[*1..3]` with `{1,3}` on the same edge.
-- **The edge variable of a variable-length hop is a list of edge IDs.** `size(e)`, `e[0]`, `e[-1]` and `UNWIND e` work, but `e.since` does not. To read edge properties along the path, name the path and use `relationships(p)`.
+- **The edge variable of a variable-length hop is a list of edges.** `size(e)`, `e[0]`, `e[-1]`, `UNWIND e` and comprehensions (`[r IN e | r.since]`) work. `e.since` fails: "Variable 'e' binds the list of a variable-length path, not a single entity".
 
 ### Quantified path patterns
 
-Repeat a one-hop sub-pattern (with its own WHERE) a number of times:
+Repeat a sub-pattern (with its own WHERE) a number of times. The sub-pattern can span several hops:
 
 ```cypher
 MATCH (a:Person {name: 'Alice'}) ((x)-[r:KNOWS]->(y) WHERE r.since > 2012){1,3} (b) RETURN b.name
 MATCH (a:Person {name: 'Alice'}) ((x)-[:KNOWS]->(y) WHERE y.age > x.age)+ (b) RETURN b.name   // ages strictly increase
+MATCH (a:Person {name: 'Alice'}) ((x)-[:KNOWS]->(y)-[:KNOWS]->(z)){1,2} (b) RETURN b.name    // two-hop body, 2 or 4 hops
+MATCH (a:Person {name: 'Alice'}) ((x)-[r:KNOWS]->(y)){1,3} (b)
+RETURN b.name, [n IN y | n.name] AS via, size(r) AS hops                                    // group variables are lists
 ```
 
-Inside the parentheses only a single hop `(node)-[edge]->(node) [WHERE ...]` is allowed. The inner variables (`x`, `r`) become lists.
+The inner variables (`x`, `y`, `r`) are group variables: each becomes a list, one element per repetition. Use them in comprehensions, `size()`, `UNWIND`, sort keys and list literals.
 
 ### Named paths
 
@@ -135,9 +162,9 @@ RETURN [n IN nodes(p) | n.name] AS names,
 ORDER BY hops
 ```
 
-- `nodes(p)` and `relationships(p)` return lists of IDs. Read properties through a list comprehension.
+- `nodes(p)` and `relationships(p)` return lists of nodes and edges. Read properties through a list comprehension, or fold them with `reduce(t = 0, r IN relationships(p) | t + r.distance)`.
 - A bare `RETURN p` comes back as a list of `{"type": "node"|"edge", "id": ...}` dicts.
-- `count(p)` works; `collect(p)` does not.
+- `count(p)` and `RETURN DISTINCT p` (grouping on a path) work; `collect(p)` does not.
 - `OPTIONAL MATCH p = ... WHERE ... RETURN p IS NULL` works.
 - Shortest paths are covered in `algorithms.md`.
 
@@ -160,7 +187,7 @@ Cartesian products over large node sets can produce unexpectedly large results �
 ## WHERE and operators
 
 ```cypher
-MATCH (n) WHERE n:Person RETURN n.name                              // label test (also n:A:B, n:A OR n:B, NOT n:A)
+MATCH (n) WHERE n:Person RETURN n.name                              // label test (also n:A|B, n:A&B, n:!A, NOT n:A)
 MATCH (n:Person) WHERE n.age >= 18 AND n.city = 'London' RETURN n.name
 MATCH (n:Person) WHERE n.name STARTS WITH 'A' OR n.name ENDS WITH 'e' OR n.name CONTAINS 'ro' RETURN n.name
 MATCH (n:Person) WHERE n.name IN ['Alice', 'Bob'] RETURN n.name
@@ -176,20 +203,19 @@ MATCH (p:Person) WHERE NOT (p)-[:KNOWS]->() RETURN p.name
 - Comparison: `= <> != < <= > >=`, plus chained comparisons (`1 < x < 3`).
 - Null tests: `IS NULL`, `IS NOT NULL`.
 - Boolean: `AND OR XOR NOT`, with three-valued null logic as in Neo4j.
-- Membership and strings: `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`.
+- Membership and strings: `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NFC|NFD|NFKC|NFKD] NORMALIZED`.
 - Arithmetic: `+ - * / % ^`. `^` returns a Double, and integer `/` truncates.
-- Concatenation: `+` and `||` concatenate strings and lists. `'x' + 1` gives `'x1'`.
-- Literals: hex literals such as `0x1F` work.
+- Concatenation: `+` and `||` concatenate strings and lists, and `list + x` appends an element. `'x' + 1` gives `'x1'`, and `'x' + true` gives `'xtrue'`.
+- Literals: hex literals such as `0x1F` work. Keywords can be used as property names and map keys (`m.match`, `{return: 1}`).
 
-**Not supported:** `=~` regex and `exists(n.prop)`. Use `n.prop IS NOT NULL` instead of the latter.
+**Not supported:** `=~` regex and `exists(n.prop)`. Use `n.prop IS NOT NULL` instead of the latter, and string functions (`toLower(n.name) STARTS WITH 'a'`) instead of regex.
 
-**Numeric type strictness.** These are deliberate and are rejected at analysis time:
-- `Integer = Double` (e.g. `n.age = 30.0`, or `n.score = 2` when `score` is a Double): error "Operands are not valid or compatible types".
-- `Double = Double`: error "Equality of types 'Double' and 'Double' is not encouraged…".
+**Numeric equality:**
+- `Integer = Double` compares the exact values: `n.age = 30.0` matches an Integer 30, and `n.age IN [30.0, 25]` works.
+- `Double = Double` is still rejected at analysis time ("Equality of types 'Double' and 'Double' is not encouraged…"). Use range comparisons (`n.score > 1.99 AND n.score < 2.01`).
+- **Cross-type ordering:** comparing values with no common order (`1 < 'a'`) gives null.
 
-Use range comparisons (`n.score > 1.99 AND n.score < 2.01`) or convert with `toInteger`. Mixed-type `<`, `>` and arithmetic are fine.
-
-**Division by zero** raises `EXEC_ERROR`. Int64 overflow wraps silently.
+**Division by zero** raises `EXEC_ERROR`, for Doubles too (`0.0 / 0.0`). Int64 overflow wraps silently.
 
 ## WITH, DISTINCT, ORDER BY, SKIP/LIMIT, UNION
 
@@ -210,7 +236,49 @@ MATCH (p:Person) RETURN p.name AS name UNION ALL MATCH (c:Company) RETURN c.name
 - **DISTINCT + ORDER BY** can only order by returned columns.
 - **Nulls** sort last in ASC and first in DESC.
 - **UNION branches** must return the same column names, and each column must keep one value type across branches.
-- **EXPLAIN:** `EXPLAIN <query>` returns the compiled plan (IR dump) without running the query.
+- **EXPLAIN:** `EXPLAIN <query>` returns the compiled plan (IR dump) without running the query. `EXPLAIN (db) <query>` limits it to the `db` stage, which is the one to read for scans and joins. Other stages are `ast`, `vdg`, `codegen`, `passes`, `nl` and `all`.
+
+### NEXT: chain queries in one request
+
+`NEXT` runs the query before it, then feeds its RETURN columns to the query after it as the incoming rows. Use it instead of `;` to run steps in order:
+
+```cypher
+MATCH (n:Person) RETURN n.name AS nm, n.age AS age
+NEXT
+RETURN nm ORDER BY nm LIMIT 2
+
+MATCH (n:Person) RETURN n.city AS city, count(*) AS c
+NEXT
+RETURN max(c) AS biggestCity
+```
+
+- **Aliases are required:** every expression in a RETURN followed by `NEXT` must be aliased with `AS`.
+- **Writes:** a later segment sees what an earlier segment wrote (`CREATE (x:N) RETURN x NEXT MATCH (y:N) RETURN count(y)`).
+
+### WHEN: conditional queries
+
+`WHEN <condition> THEN <query> [WHEN … THEN …] [ELSE <query>]` runs the first branch whose condition is true. Branches can read or write, and must return the same columns.
+
+```cypher
+WHEN true THEN RETURN 1 AS x ELSE RETURN 2 AS x
+
+// After NEXT: the condition reads the incoming row
+MATCH (n:Person) RETURN n.name AS nm, n.age AS age
+NEXT
+WHEN age > 30 THEN RETURN nm, 'senior' AS band
+ELSE RETURN nm, 'junior' AS band
+
+// Per row, inside a CALL subquery
+MATCH (n:Person)
+CALL (n) { WHEN n.age > 30 THEN RETURN 'old' AS b ELSE RETURN 'young' AS b }
+RETURN n.name, b
+
+{ WHEN true THEN RETURN 1 AS x } UNION { WHEN true THEN RETURN 2 AS x }   // combine with UNION
+```
+
+**Where WHEN can go:** a WHEN can start a query, follow `NEXT`, or form a `CALL { }` body. It can't follow `MATCH … WITH` directly; put `NEXT` in between. A branch can hold a NEXT chain in braces: `WHEN c THEN { MATCH … RETURN … NEXT RETURN … }`.
+
+**Not supported:** UNION inside a WHEN branch, and WHEN inside EXISTS, COUNT or COLLECT bodies.
 
 ## Aggregation
 
@@ -236,9 +304,13 @@ MATCH (n) RETURN labels(n) AS l, count(*) ORDER BY l                            
 - `collect(x)`, `collect(DISTINCT x)` (nulls are dropped)
 - `sum`
 - `avg` (always Double)
-- `min`, `max` (numbers, strings, booleans, DateTime, Duration)
+- `min`, `max`: numbers, strings, booleans, DateTime, Duration, lists, and mixed-type values (ordered as in Neo4j)
+- `stDev` (sample), `stDevP` (population)
+- `percentileCont(x, p)`, `percentileDisc(x, p)`; `p` may also be read off the row
 
-There is **no** `stdev`, `percentileCont`, `percentileDisc`, or the other statistical aggregates. Compute those in pandas.
+```cypher
+MATCH (n:Person) RETURN stDev(n.age) AS sd, percentileCont(n.age, 0.5) AS median, percentileDisc(n.age, 0.9) AS p90
+```
 
 **Rules:**
 - Aggregates are invalid in `WHERE`. Filter after a `WITH` instead.
@@ -249,7 +321,7 @@ There is **no** `stdev`, `percentileCont`, `percentileDisc`, or the other statis
 - With no grouping keys, one row is returned: `count` = 0, `sum` = 0, `avg` = null, `collect` = [].
 - With grouping keys, no rows are returned.
 
-## Lists, UNWIND, comprehensions, CASE
+## Lists, UNWIND, comprehensions, reduce, CASE
 
 ```cypher
 UNWIND [1, 2, 3] AS x RETURN x * 10
@@ -261,14 +333,15 @@ RETURN [1, 2, 3, 4, 5][0], [1, 2, 3, 4, 5][-1], [1, 2, 3, 4, 5][1..3], [1, 2, 3]
 RETURN [x IN range(1, 6) WHERE x % 2 = 0 | x * x]                 // list comprehension
 MATCH (a:Person) RETURN a.name, [(a)-[:KNOWS]->(b) | b.name] AS friends            // pattern comprehension
 MATCH (n:Person) WHERE any(t IN n.tags WHERE t = 'vip') RETURN n.name               // all / any / none / single
-RETURN size([1, 2]), head([1, 2]), last([1, 2]), tail([1, 2])
+RETURN size([1, 2]), head([1, 2]), last([1, 2]), tail([1, 2]), reverse([1, 2])
+RETURN reduce(acc = 0, x IN [1, 2, 3] | acc + x) AS total                          // fold a list
 ```
 
 - **List literals** can contain expressions, mixed types, nested lists and maps.
 - **Indexing and slicing** work on literals, list properties, and function results (`labels(n)[0]`).
 - **Equality:** lists and maps compare by value.
 - **Null handling:** `size(null)`, `head([])` and out-of-range indexes return null.
-- **`reduce()` is not supported.** Use `UNWIND` plus an aggregate instead.
+- **Mixed-type lists:** elements read from a mixed-type list (`row[1]` of `['Brest', 139000]`) have type Any. Arithmetic, string functions and conversions work on them. To write one as a property, convert it first (`toInteger(row[1])`).
 
 ```cypher
 MATCH (n:Person)
@@ -278,16 +351,26 @@ RETURN n.name,
        CASE n.age WHEN > 30 THEN 'old' WHEN 25, 30 THEN 'mid' WHEN IS NULL THEN '?' END AS ext   // extended CASE tests
 ```
 
+CASE branches can return lists, maps, DateTimes and Durations, and branches of different types can be mixed (`CASE WHEN c THEN 1 ELSE 'x' END`). The same holds for `coalesce(n.score, 'none')`.
+
 ### Maps
 
-Map literals can be built, returned, compared with `=`, and stored as properties, e.g. `RETURN {name: n.name, tags: n.tags} AS m`.
+Map literals can be built, returned, compared, sorted, tested for null, and stored as properties. Reading them works too:
 
-**Reading from a map is not supported:**
-- `m.key`, `m['key']` and `n.mapProp.key` all error.
-- Map projection (`n {.name, .age}`) is a parse error.
-- `properties(n)` doesn't exist, and `keys()` fails.
+```cypher
+WITH {a: 1, b: 'x'} AS m RETURN m.a, m.b                          // static key
+WITH {a: 1, b: 2} AS m UNWIND keys(m) AS k RETURN k, m[k]         // dynamic key from a variable
+WITH [{a: 1}, {a: 2}] AS ms RETURN ms[1].a, [m IN ms | m.a]       // map in a list
+WITH {xs: [1, 2, 3]} AS m RETURN m.xs[0], size(m.xs)              // list in a map
+UNWIND [{name: 'Brest', pop: 139000}] AS row RETURN row.name, row.pop
+MATCH (n:Person) RETURN properties(n) AS props, keys(n) AS ks     // all properties of a node or edge
+MATCH (n:Person) WHERE 'email' IN keys(n) RETURN n.name           // property presence test
+MATCH (n:Person) RETURN {name: n.name, age: n.age} AS m           // instead of map projection
+```
 
-Return the individual properties you need instead.
+- **Literal keys:** `m['a']` with a literal key is rejected ("A map key known in the query is written m.key"). Write `m.a`; brackets are for keys held in a variable.
+- **No map projection:** `n {.name, .age}` and `n {.*}` are parse errors. Build the map literal instead, or use `properties(n)`.
+- **Type-erased values:** map values have type Any. They work in expressions, but writing one as a property needs a conversion (see `writing.md`).
 
 ## Subqueries
 
@@ -302,43 +385,49 @@ MATCH (p:Person) RETURN p.name, EXISTS { (p)-[:LIKES]->() } AS likesSomething
 MATCH (p:Person) RETURN p.name, COUNT { (p)-[:KNOWS]->() } AS outDegree ORDER BY outDegree DESC
 MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]-(x) RETURN x } >= 2 RETURN p.name
 
+// COLLECT: the body's single column as a list
+MATCH (p:Person) RETURN p.name, COLLECT { MATCH (p)-[:KNOWS]->(f) RETURN f.name } AS friends
+MATCH (p:Person) WHERE size(COLLECT { MATCH (p)-[:KNOWS]-(f) RETURN f.name }) >= 2 RETURN p.name
+
 // CALL subqueries: per-row top-k, per-row aggregates, UNION inside
 MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]->(f) RETURN f.name AS friend ORDER BY f.name LIMIT 1 } RETURN p.name, friend
 MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS deg } RETURN p.name, deg
+MATCH (p:Person) CALL (*) { MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS deg } RETURN p.name, deg   // import everything
 MATCH (p:Person) OPTIONAL CALL (p) { MATCH (p)-[:WORKS_AT]->(c) RETURN c.name AS co } RETURN p.name, co
 CALL { MATCH (p:Person) RETURN p.name AS nm UNION MATCH (c:Company) RETURN c.name AS nm } RETURN nm ORDER BY nm
 ```
 
 - **Dropped rows:** a non-optional `CALL` drops outer rows for which the body returns nothing.
 - **Imported variables:** a CALL body can't return an imported variable under its own name. Alias it (`RETURN p AS me`).
+- **Conditional bodies:** a CALL body can be a `WHEN … THEN … ELSE …` (see WHEN above).
 - **Not supported:**
-  - `COLLECT { ... }`. Use `collect()` in a CALL body or a pattern comprehension instead.
-  - `CALL (*) { }`.
   - `CALL { } IN TRANSACTIONS`.
   - `OPTIONAL CALL` on a *procedure*.
+  - WHEN inside an EXISTS, COUNT or COLLECT body.
 
 ## Built-in functions
 
-This is the complete list. **Function names are case-sensitive** (`toInteger`, not `TOINTEGER`), except `count` and `collect`.
+This is the complete list. **Function names are case-insensitive** (`toInteger`, `TOINTEGER` and `ToInteger` all work).
 
 | Category | Functions | Notes |
 |----------|-----------|-------|
-| Entity | `id(x)`, `labels(n)`, `type(r)`, `startNode(r)`, `endNode(r)` | `labels` returns a **list**. `type` returns a string (`edgeType()` was removed). `startNode(r).name` works |
-| Path | `nodes(p)`, `relationships(p)`, `length(p)` | Lists of IDs; read properties via a comprehension |
-| List | `size`, `length`, `head`, `last`, `tail`, `range(start, end[, step])` | `size`/`length` also work on strings. `range` bounds are inclusive |
-| Predicates | `all`, `any`, `none`, `single` `(x IN list WHERE …)` | |
-| Conversion | `toInteger`, `toFloat`, `toString`, `toBoolean`, `coalesce(a, b, …)` | `toInteger`/`toFloat` accept strings, ints and doubles; a bad string gives null. `toBoolean` accepts strings only. `coalesce` arguments must share one type |
+| Entity | `id(x)`, `labels(n)`, `type(r)`, `startNode(r)`, `endNode(r)`, `keys(x)`, `properties(x)` | `labels` and `keys` return **lists**. `properties` returns a map of a node, an edge or a map. `type` returns a string. `startNode(r).name` works |
+| Path | `nodes(p)`, `relationships(p)`, `length(p)` | Lists of nodes / edges; read properties via a comprehension |
+| List | `size`, `length`, `head`, `last`, `tail`, `reverse`, `range(start, end[, step])` | `size`/`length` also work on strings. `range` bounds are inclusive |
+| Fold | `reduce(acc = init, x IN list \| expr)` | |
+| Predicates | `all`, `any`, `none`, `single` `(x IN list WHERE …)` | Stop at the first element that decides the answer |
+| String | `toUpper`, `toLower`, `trim`, `ltrim`, `rtrim`, `substring(s, start[, len])`, `left(s, n)`, `right(s, n)`, `split(s, sep)`, `replace(s, from, to)`, `reverse`, `char_length` / `character_length`, `normalize(s[, NFC\|NFD\|NFKC\|NFKD])` | 0-based positions; a negative `start` or `len` raises EXEC_ERROR. `normalize` gives null for a non-string |
+| Math | `abs`, `sign`, `round(x)`, `floor`, `ceil`, `sqrt`, `exp`, `log`, `log10`, `e()`, `pi()`, `sin`, `cos`, `tan`, `cot`, `asin`, `acos`, `atan`, `haversin`, `radians`, `degrees` | `round`/`floor`/`ceil` return Doubles. `log(-1)` and `sqrt(-1)` give NaN |
+| Conversion | `toInteger`, `toFloat`, `toString`, `toBoolean`, `toIntegerOrNull`, `toFloatOrNull`, `toStringOrNull`, `toBooleanOrNull`, `coalesce(a, b, …)` | Strict forms accept strings, numbers and booleans (`toBoolean(1)`, `toInteger(true)`), and give null for a bad string. The `OrNull` forms give null for any unconvertible value. `toString` formats DateTimes (`2024-03-15T10:30:00Z`) and Durations (`PT48H`) |
 | Temporal | `datetime(isoString)`, `datetime(epochSeconds)`, `datetime()`, `duration({days: 2, hours: 3})`, `duration(micros)` | See Data Types |
 | Embedding | `cosine_similarity(a, b)`, `euclidean_distance(a, b)` | Arguments must be Embeddings, not lists (see `algorithms.md`) |
-| Aggregate | `count`, `collect`, `sum`, `avg`, `min`, `max` | |
+| Aggregate | `count`, `collect`, `sum`, `avg`, `min`, `max`, `stDev`, `stDevP`, `percentileCont`, `percentileDisc` | |
 
 **Not available** (each errors with "Function 'X' does not exist"):
-- **String:** `toUpper`, `toLower`, `substring`, `split`, `replace`, `trim`, `left`, `right`, `reverse`.
-- **Math:** `abs`, `round`, `floor`, `ceil`, `sqrt`, `log`, `exp`, `rand`, `sign`, `pi`.
-- **Temporal:** `date()`, `timestamp()`.
-- **Other:** `properties`, `elementId`, `exists()`, `reduce`.
-
-Post-process in pandas instead.
+- **String:** `btrim`, `lpad`/`rpad`, and `=~` regex.
+- **Math:** `rand`, `atan2`, `isNaN`, and the two-argument `round(x, digits)` ("Invalid arguments").
+- **Temporal:** `date()`, `localdatetime()`, `timestamp()`.
+- **Other:** `elementId`, `exists()`.
 
 ## LOAD CSV
 
@@ -358,9 +447,7 @@ LOAD CSV 'bad.csv' WITH HEADERS ON ERROR SKIP AS row RETURN row.a               
 - `row` can't be returned whole. Read fields as `row.col` or `row[<literal index>]`.
 - Without `WITH HEADERS`, the header line comes back as a data row.
 
-**Composition:**
-- MATCH, WITH/WHERE, aggregates, ORDER BY and UNWIND all compose with LOAD CSV.
-- **OPTIONAL MATCH bug:** an OPTIONAL MATCH directly after LOAD CSV that uses `row.x` inside the pattern hits an internal error. Project the fields first: `... AS row WITH row.name AS nm OPTIONAL MATCH (p:Person {name: nm}) ...`.
+**Composition:** MATCH, OPTIONAL MATCH, WITH/WHERE, aggregates, ORDER BY, UNWIND and subqueries all compose with LOAD CSV and can read `row.x`.
 
 To **build a graph** from CSV, see `writing.md`.
 
@@ -392,16 +479,16 @@ To **build a graph** from CSV, see `writing.md`.
 - Components work: `d.year`, `d.month`, `d.day`, `d.hour`, …, `dur.days`, `dur.hours`, …
 - `min`/`max` and `<`/`>` work on temporal values.
 
-**Precision over HTTP:** the JSON encoder prints Doubles with **6 decimal places** (`3.14159265` → `3.141593`, `1e-9` → `0.000000`). If you need full precision, scale the value in the query or use the embedded backend.
+**Doubles over HTTP** keep full precision (`0.1 + 0.2` → `0.30000000000000004`). Non-finite values are written as `NaN`, `Infinity` and `-Infinity`, and the SDK reads them back as float `nan` / `inf`. NaN sorts after every number.
 
 ## Gotchas
 
-- `RETURN n` gives an integer ID, not a node object or property map. Project the properties you need (`n.name, n.age`).
-- No parameters (`$x`). Inline literals and escape quotes.
+- `RETURN n` gives an integer ID, not a node object or property map. Project the properties you need (`n.name, n.age`) or use `properties(n)`.
+- `$parameters` only name labels and edge types. Inline values as literals and escape quotes.
 - Aggregates are invalid in WHERE. Use `WITH … WHERE`.
 - Comma-separated patterns are cartesian products, not joins. Make sure you intended that rather than a join on a shared variable.
 - Postfix `->*` means 0+ hops, but bracket `-[*]->` means 1+ hops.
-- `Integer = Double` and `Double = Double` comparisons are rejected. Use ranges.
-- Function names are case-sensitive, and unknown property names silently read as null.
-- Keywords are case-insensitive (`MATCH` == `match`). Labels, edge types and property names are case-sensitive.
+- `Double = Double` comparisons are rejected. Use ranges. `Integer = Double` is fine.
+- Unknown property names silently read as null.
+- Keywords and function names are case-insensitive (`MATCH` == `match`, `AVG` == `avg`). Labels, edge types and property names are case-sensitive.
 - Only `//` starts a comment; `-- text` is parsed as part of the query. `s3` is a reserved word (S3 commands), so don't use it as a variable name.

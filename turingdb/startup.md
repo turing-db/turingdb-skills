@@ -10,13 +10,13 @@ By default, connect to a running TuringDB **server** over HTTP. The SDK uses thi
 ## Step 1 — Ensure turingdb is installed
 
 ```bash
-uv add 'turingdb>=3.0'
+uv add 'turingdb>=3.0.2'
 ```
 
 If the project doesn't use uv:
 
 ```bash
-pip install 'turingdb>=3.0'
+pip install 'turingdb>=3.0.2'
 ```
 
 The wheel (Python 3.10–3.14; Linux x86_64/aarch64, macOS arm64) includes:
@@ -25,7 +25,9 @@ The wheel (Python 3.10–3.14; Linux x86_64/aarch64, macOS arm64) includes:
 - the in-process engine,
 - the bundled `greeter` example extension.
 
-Pin `>=3.0`. Older projects may pin `1.x`, which uses the previous engine and a much smaller Cypher subset.
+Pin `>=3.0.2`. That release adds the features this skill describes beyond 3.0: label/edge-type parameters, label expressions, string and math functions, `NEXT`, `WHEN`, `FOREACH` and `COLLECT {}`, among others. Older projects may pin `1.x`, which uses the previous engine and a much smaller Cypher subset.
+
+**Client and server versions must match across the 3.0.2 boundary.** From 3.0.2, the SDK sends each query as a JSON body (see Raw HTTP below), and the server accepts nothing else. An older SDK against a 3.0.2 server gets `PARSE_ERROR: The request body must be a JSON object`, so upgrade both together.
 
 ## Step 2 — Connect to a server
 
@@ -38,7 +40,9 @@ client = TuringDB(host="http://localhost:6666")   # HTTP/JSON client (the defaul
 client.list_loaded_graphs()                        # raises if the server isn't reachable
 ```
 
-If nothing is listening on that port, start a server first ("Starting a server" below), then connect. Connection failures and HTTP errors such as 401 are raised as **`httpx` exceptions**, not `TuringDBException`. Query errors are raised as `TuringDBException`.
+If nothing is listening on that port, start a server first ("Starting a server" below), then connect.
+- **`httpx` exceptions:** connection failures, and HTTP errors without a JSON body such as 401.
+- **`TuringDBException`:** query errors, and HTTP errors the server explains in JSON, such as `REQUEST_TOO_BIG` (HTTP 413).
 
 ### Authentication
 
@@ -94,7 +98,11 @@ Start a server with the `turingdb` CLI if one isn't already running. `turingdb` 
 | `-reset-default` | Reset the content of the `default` graph |
 | `-auth-on` | Require a bearer token. The token is read from `TURINGDB_AUTH_TOKEN`, and startup fails if that variable is unset |
 | `-ui` / `-ui-port <port>` | Launch the browser visualizer (default port 8080) |
-| `-start-timeout <ms>` | Milliseconds to wait for daemon readiness (default 500) |
+| `-no-vector-mmap` | Read HNSW vector indexes into memory at startup instead of memory-mapping the index files |
+
+With `-demon`, `start` returns once the server is ready, or exits with status 1 and prints why it couldn't start, for example:
+- `Could not start the server on 127.0.0.1:6666: bind: Address already in use`
+- `TuringDB is already running (PID: …)` when the same `-turing-dir` is in use.
 
 Try each invocation in order, stopping at the first that works:
 
@@ -125,21 +133,25 @@ Add `-timeout <ms>` (alias `-t <ms>`) to change how long `stop` waits for the pr
 `turingdb start` without `-demon` opens a Cypher shell on top of the server. Shell commands:
 - `cd <graph>`: switch graph.
 - `checkout change-<id>`, `checkout <commit>`, `checkout`: switch to a change, a commit, or back to HEAD.
-- `read <file>`, `help`, `quit`.
+- `:param <name> => <json value>`: set a query parameter (`:param lbl => "Person"`). `SHOW PARAMETERS` lists them, and `:param clear` removes them all.
+- `read <file>`, `help`, `quit` / `exit`.
 
 It is handy for manual exploration. Agents should use the SDK instead.
 
 ### Raw HTTP
 
-The SDK is a thin client over one endpoint:
+The SDK is a thin client over one endpoint. The request body is a **JSON object** with the query and optional parameters:
 
 ```bash
-curl -s -X POST 'http://localhost:6666/query?graph=my_graph' -d "MATCH (n) RETURN count(n)"
+curl -s -X POST 'http://localhost:6666/query?graph=my_graph' \
+     -d '{"query": "MATCH (n:$lbl) RETURN count(n)", "parameters": {"lbl": "Person"}}'
 ```
 
-- **Optional query-string params:** `change=<hex change id>` and `commit=<hash>`.
+- **Body:** `query` (string, required) and `parameters` (object, optional). A plain-text body fails with `PARSE_ERROR: The request body must be a JSON object`, and any other field with `PARSE_ERROR: Unknown field '<name>' in the request body`.
+- **Optional query-string params:** `change=<decimal change id>` (as `CHANGE NEW` returns it) and `commit=<hash>`. A value that doesn't parse, or names a change or commit that doesn't exist, is an error, not a silent fallback to main.
+- **Size limit:** the request line, headers and body together must fit in **1 MiB**. A bigger request gets HTTP 413 with `{"error":"REQUEST_TOO_BIG",…}`.
 - **Success response:** `{"header":{"column_names":[...],"column_types":[...]},"data":[chunk,...],"time":ms}`, where each chunk is a list of columns.
-- **Error response:** `{"error":"PARSE_ERROR|ANALYZE_ERROR|PLAN_ERROR|EXEC_ERROR|...","error_details":"..."}`.
+- **Error response:** `{"error":"PARSE_ERROR|ANALYZE_ERROR|PLAN_ERROR|EXEC_ERROR|GRAPH_NOT_FOUND|CHANGE_NOT_FOUND|COMMIT_NOT_FOUND|...","error_details":"..."}`. The details name the missing graph, change or commit (e.g. `Change '99' does not exist`).
 
 ---
 
