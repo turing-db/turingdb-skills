@@ -103,7 +103,7 @@ Measured on a 200k-node, 400k-edge graph (server-side time):
   - **Check with `EXPLAIN (db)`:** the plan should show `const_scan_nodes` or `fetch_nodes`, not `scan_nodes` followed by a filter, and no `cross_product`.
 - **Get the IDs once, reuse them.** Fetch them with whatever filter you need (`MATCH (n:Person {email: 'a@x.org'}) RETURN id(n)`, or `RETURN n`), keep them in Python, and address those nodes by ID from then on.
   - **Key lookups:** a single key lookup with a constant (`{pid: 7}`) is fine. It's per-row key lookups (`UNWIND keys … {pid: x}`, LOAD CSV joins) that are slow.
-  - **Never match two nodes per row by key property** (`MATCH (a:P {pid: p[0]}) MATCH (b:P {pid: p[1]})`). That still plans as a **cross product of label scans** and can exhaust server memory. Map the keys to native IDs first.
+  - **Never match two nodes per row by key property** (`MATCH (a:P {pid: p[0]}) MATCH (b:P {pid: p[1]})`). Each row scans the whole label once per endpoint, and a property index doesn't help (TUR-338). That is about 7.5 s for 1,000 pairs on 200k nodes, against 3.8 ms by native ID. Map the keys to native IDs first.
 - **Vector search results:** `VECTOR SEARCH … YIELD ids` binds `ids` directly as nodes. Use them as is (`ids.title`, `MATCH (ids)-[...]->(...)`). Re-matching with `MATCH (n:Label) WHERE n = ids` is also a direct fetch now; use it only to keep the hits that carry a label.
 
 **Stability.** Native IDs of existing nodes are stable across queries, change submits and server restarts, so it is safe to cache them for a working session. Two exceptions:
