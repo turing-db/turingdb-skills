@@ -125,7 +125,7 @@ hist = client.query("CALL db.history()")                    # newest first
 head = hist.loc[0, "commit"].removesuffix("(HEAD)")        # HEAD row carries a literal "(HEAD)" suffix
 
 # Query a specific past commit (read-only; writes are refused there)
-client.checkout(commit="5007dcb2a08e3011")    # or client.set_commit(...)
+client.checkout(commit="5007dcb2a08e3011")    # loads the commit if needed (see below)
 df = client.query("MATCH (n) RETURN count(n)")
 
 client.checkout()                 # back to main/HEAD
@@ -140,10 +140,14 @@ client.set_graph("other_graph")   # switch graph context
 - `db.describeCommit('<hash>')` returns 0/0/0 for an unknown hash rather than an error.
 - An unknown hash passed to `checkout(commit=…)` gives `COMMIT_NOT_FOUND: Commit '<hash>' does not exist`.
 
-Via Cypher (REST API only; the CLI and SDK handle this automatically):
+**After a server restart, past commits are not in memory.** `client.checkout(commit=…)` loads the commit itself.
+`client.set_commit(…)` and the REST `?commit=` parameter do not: the next query fails with
+`COMMIT_NOT_LOADED: Commit '<hash>' is not loaded to memory - use LOAD COMMIT '<hash>' to load it`.
+Load it once, then retry:
 ```cypher
 LOAD COMMIT 'abc123'
 ```
+A client that reads past commits over REST should catch `COMMIT_NOT_LOADED`, run `LOAD COMMIT`, and retry.
 
 ## SDK Client Backends
 
@@ -193,7 +197,7 @@ client.set_graph(graph_name: str)
 client.new_change() -> int                               # CHANGE NEW; ALSO switches the client onto it
 client.checkout(change: int | "main" = "main", commit: str = "HEAD")   # call after CHANGE SUBMIT
 client.set_change(change: int | str)                     # int or decimal string, as CHANGE NEW returns it
-client.set_commit(commit: str)
+client.set_commit(commit: str)                           # does NOT load a past commit after a restart; checkout(commit=) does
 # There is no submit() method: submit via client.query("CHANGE SUBMIT"), then client.checkout()
 
 # Connection / timing

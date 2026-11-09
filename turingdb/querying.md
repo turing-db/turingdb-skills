@@ -109,6 +109,7 @@ Measured on a 200k-node, 400k-edge graph (server-side time):
 **Stability.** Native IDs of existing nodes are stable across queries, change submits and server restarts, so it is safe to cache them for a working session. Two exceptions:
 - **New nodes:** nodes created in an open change get their final IDs at `COMMIT` / `CHANGE SUBMIT`. Read them after that.
 - **Compaction:** `MERGE_DATAPARTS` **renumbers** all nodes. Re-fetch any cached IDs, and rebuild vector indexes keyed by node IDs, afterwards.
+  **The merge is not persisted on its own:** after a clean restart it is gone from `db.history()` and the IDs are back to their pre-merge values, with no error. Submit a change after the merge to keep it, or re-fetch IDs again after any restart.
 
 Keep a business key property as well, for durable identity outside TuringDB. `elementId()` does not exist. For edges, `MATCH ()-[r]->() WHERE id(r) = 0 RETURN startNode(r), endNode(r)` works.
 

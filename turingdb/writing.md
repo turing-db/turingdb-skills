@@ -275,7 +275,7 @@ These can be issued via `client.query()` or from the CLI:
 | `CHANGE DELETE` | Discard the current change |
 | `CHANGE LIST` | List the open change IDs for the current graph |
 | `COMMIT` | Seal pending writes inside the change. Needed before later queries in the change can MATCH newly created entities |
-| `MERGE_DATAPARTS` | Compact the graph's accumulated DataParts into one. Run on main with **no change open on any graph** |
+| `MERGE_DATAPARTS` | Compact the graph's accumulated DataParts into one. Run on main with **no change open on any graph**. Renumbers nodes; lost on a restart unless a change is submitted after it (see `querying.md`) |
 
 ## Property Indexes
 

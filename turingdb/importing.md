@@ -188,6 +188,7 @@ Line format:
 - **Relationships:** each needs exactly one `label`. `start`/`end` reference node `id`s, either in the APOC object form `{"id": "..."}` or as a bare integer (`"end": 25`).
 - **Property values:** arrays load as `List` properties. Nested objects are stored as JSON strings. A JSON `null` leaves the property unset. ISO date strings stay strings unless declared (see below).
 - **Errors:** a malformed line fails the load with the line number and the parser's message, e.g. `JSONL error 'JSONL parse' at line 2: … syntax error while parsing object`.
+- **`NaN` and `Infinity` are not JSON**, and one of them fails the whole load (`… at line 2: … syntax error while parsing value - invalid literal; last read: '"x":N'`). Python's `json.dumps` writes them by default: write with `allow_nan=False`, or turn them into `null` first.
 
 Typed options can be chained after the graph name:
 
