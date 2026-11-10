@@ -10,7 +10,7 @@ Targets **TuringDB 3.1** (`turingdb>=3.1` on PyPI, `turingdb@3.1` on npm). 3.1 s
 |------|--------|
 | `SKILL.md` | Entry point — key differences from Neo4j Cypher, then routes to the right reference based on your task |
 | `startup.md` | Install the package, start/stop a server, connect from Python (server, auth token, embedded) or JavaScript/TypeScript (`TuringClient`), load/create a graph |
-| `querying.md` | MATCH/OPTIONAL MATCH, label expressions, variable-length and quantified paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps and map projection, subqueries, functions, points, parameters, LOAD CSV, result types |
+| `querying.md` | MATCH/OPTIONAL MATCH, label expressions, variable-length and quantified paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps and map projection, subqueries, functions, points, parameters, LOAD CSV, result types, and use cases for reduce, allReduce, COLLECT, EXISTS/COUNT, CALL and NEXT |
 | `writing.md` | CREATE, MERGE, SET (incl. from a map), REMOVE, DETACH DELETE, FOREACH, bulk writes with parameters (edges by native ID pairs), indexes, and the change/commit workflow |
 | `importing.md` | Import external data — CSV, Parquet (`LOAD PARQUET`, `turing-parquet`), JSONL, GML, Neo4j migration |
 | `algorithms.md` | Shortest path, path finding with variable-length patterns, vector/embedding search, geographic distances, GNN sampling |
