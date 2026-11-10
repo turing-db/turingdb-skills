@@ -2,18 +2,18 @@
 
 Claude Code skills that teach agents how to start, query, and manage [TuringDB](https://docs.turingdb.ai/) graph databases.
 
-Targets **TuringDB v3** (`turingdb>=3.0.2` on PyPI). v3 runs every query on the new engine and supports most of openCypher. The skill documents what works, what doesn't, and where TuringDB differs from Neo4j Cypher.
+Targets **TuringDB 3.1** (`turingdb>=3.1` on PyPI, `turingdb@3.1` on npm). 3.1 speaks a binary protocol over HTTP/1.1, takes query parameters, and supports most of openCypher. The skill documents what works, what doesn't, where TuringDB differs from Neo4j Cypher, and which query shapes are fast, with timings measured on 3.1.
 
 ## What's included
 
 | File | Covers |
 |------|--------|
 | `SKILL.md` | Entry point — key differences from Neo4j Cypher, then routes to the right reference based on your task |
-| `startup.md` | Install the package, start/stop a server, connect (HTTP, auth token, embedded), load/create a graph |
-| `querying.md` | MATCH/OPTIONAL MATCH, label expressions, variable-length and quantified paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps, subqueries, functions, parameters, LOAD CSV, result types |
-| `writing.md` | CREATE, MERGE, SET, REMOVE, DETACH DELETE, FOREACH, bulk writes (edges by native ID pairs), indexes, and the change/commit workflow |
+| `startup.md` | Install the package, start/stop a server, connect from Python (server, auth token, embedded) or JavaScript/TypeScript (`TuringClient`), load/create a graph |
+| `querying.md` | MATCH/OPTIONAL MATCH, label expressions, variable-length and quantified paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps and map projection, subqueries, functions, points, parameters, LOAD CSV, result types |
+| `writing.md` | CREATE, MERGE, SET (incl. from a map), REMOVE, DETACH DELETE, FOREACH, bulk writes with parameters (edges by native ID pairs), indexes, and the change/commit workflow |
 | `importing.md` | Import external data — CSV, Parquet (`LOAD PARQUET`, `turing-parquet`), JSONL, GML, Neo4j migration |
-| `algorithms.md` | Shortest path, path finding with variable-length patterns, vector/embedding search, GNN sampling |
+| `algorithms.md` | Shortest path, path finding with variable-length patterns, vector/embedding search, geographic distances, GNN sampling |
 | `introspection.md` | Explore schema, procedures, versioning, time travel, SDK reference |
 
 ## Install

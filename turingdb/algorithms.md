@@ -1,6 +1,6 @@
 ---
 name: turingdb-algorithms
-description: Use when running path and graph algorithms in TuringDB v3 — weighted shortest path (Dijkstra statement), hop-count and weighted routes via variable-length paths, vector/embedding similarity search (HNSW/flat indexes), embedding properties and writing computed embeddings back with LOAD EMBEDDING, and distributed GNN training (GraphSAGE / DGL / PyTorch) with server-side sampling via gnn.graphSAGE.
+description: Use when running path and graph algorithms in TuringDB v3.1 — weighted shortest path (Dijkstra statement), hop-count and weighted routes via variable-length paths, vector/embedding similarity search (HNSW/flat indexes), embedding properties and writing computed embeddings back with LOAD EMBEDDING, geographic distance and nearest-place queries with points, and distributed GNN training (GraphSAGE / DGL / PyTorch) with server-side sampling via gnn.graphSAGE.
 ---
 
 # TuringDB: Algorithms
@@ -38,16 +38,21 @@ A join can feed an endpoint, e.g. `MATCH (x {name: 'Bromsgrove'})-[:LINK]->(a), 
 - **Only `dist` and `path` can be returned.** Any other variable, including a separately matched copy of an endpoint, fails with `Cannot return a after SHORTESTPATH.` To label the route, map the IDs in `path` back to names with a second query:
 
 ```python
-row = client.query("MATCH (a:Station {name:'A'}), (b:Station {name:'B'}) "
-                   "shortestPath(a, b, distance, dist, path) RETURN dist, path").iloc[0]
+row = client.query(
+    "MATCH (a:Station {name: $src}), (b:Station {name: $dst}) "
+    "shortestPath(a, b, distance, dist, path) RETURN dist, path",
+    {"src": "Bromsgrove", "dst": "Worcester Shrub Hill"},
+).iloc[0]
 node_ids = [int(i) for i in row["path"][0::2]]          # even positions are nodes, source → target
-names = client.query(f"UNWIND {node_ids} AS x MATCH (n) WHERE n = x RETURN x AS id, n.name AS name")
+names = client.query(
+    "UNWIND $ids AS x MATCH (n) WHERE n = x RETURN x AS id, n.name AS name",
+    {"ids": node_ids},
+)
 # one direct fetch per ID; reorder by node_ids if the row order matters
 ```
 
-- **Path functions return IDs only, target first.** `length(path)`, `nodes(path)` and `relationships(path)` can be returned, but:
-  - `nodes(path)` and `relationships(path)` list the route **from the target back to the source**. For A→B→C they give `[C, B, A]`, while `path` itself runs `[A, e1, B, e2, C]`.
-  - You can't read properties through them in the same query: `[n IN nodes(path) | n.name]` fails with `Cannot return n after SHORTESTPATH.` Map the IDs back with a second query, as above.
+- **Path functions return IDs only.** `length(path)`, `nodes(path)` and `relationships(path)` can be returned, in route order from source to target. You can't read properties through them in the same query: `[n IN nodes(path) | n.name]` fails with `Cannot return n after SHORTESTPATH.` Map the IDs back with a second query, as above.
+- **Parameters** work in the MATCH that picks the endpoints, as above.
 - **The Neo4j/GQL forms are not supported.** `shortestPath((a)-[*]-(b))`, `allShortestPaths(...)`, `ANY SHORTEST` and `SHORTEST k` are all parse errors.
 
 ## Path finding with variable-length patterns
@@ -131,6 +136,7 @@ RETURN n.title
 ```
 
 - **Syntax:** `VECTOR SEARCH IN <index> FOR <k> (<vector>) YIELD ids [AS x][, score [AS s]]`.
+- **The query vector is a literal.** A parameter can't stand for it yet (`FOR 5 $v` is a parse error), so format the floats into the query text: `f"VECTOR SEARCH IN my_index FOR 5 ({', '.join(map(str, vec))}) YIELD ids, score"`. Parameters still work in the rest of the query (`WHERE score > $min`).
 - **The query vector's dimension must match the index.** A mismatch is an error.
 - **Key the vector file by native node IDs, and use `ids` directly.** `ids` is then the node itself, so `ids.title` and `MATCH (ids)-[...]->(...)` read and expand it without any lookup. Re-matching with `MATCH (n:Document) WHERE n = ids` is a direct fetch plus a label check, so it is fine for filtering by label.
 - **Don't key the file by your own IDs.** Joining them back through a property (`WHERE n.doc_id = ids`) scans the label.
@@ -224,6 +230,33 @@ LOAD JSONL "mydata.jsonl" AS mygraph WITH EMBEDDINGS [{"emb", 384}, {"summary_ve
 
 ---
 
+## Geographic distance and nearest places
+
+Store locations as Point properties (`point({latitude: …, longitude: …})`, `LOAD JSONL … WITH POINTS`, or GeoParquet with `LOAD PARQUET`; see `querying.md` for the functions). Pass the reference coordinates as parameters:
+
+```python
+# the 5 nearest cities to a location, in km (great-circle)
+client.query("""
+MATCH (c:City)
+WITH c, point.distance(c.at, point({latitude: $lat, longitude: $lon})) AS d
+RETURN c.name, round(d / 1000) AS km
+ORDER BY km LIMIT 5
+""", {"lat": 48.85, "lon": 2.35})
+
+# everything inside a bounding box, then within 400 km
+client.query("""
+MATCH (c:City)
+WHERE point.withinBBox(c.at, point({latitude: $s, longitude: $w}), point({latitude: $n, longitude: $e}))
+  AND point.distance(c.at, point({latitude: $lat, longitude: $lon})) < 400000
+RETURN c.name
+""", {"s": 40, "w": -5, "n": 55, "e": 10, "lat": 51.5, "lon": -0.13})
+```
+
+- **Units:** WGS-84 distances are metres, on a sphere of radius 6,371,008.8 m (haversine). Cartesian distances are in the units of the coordinates.
+- **Scans:** there is no spatial index, so both queries scan the label. Use `point.withinBBox` with a tight box to cut the rows before sorting by distance.
+
+---
+
 ## GNN training: sample on TuringDB with `gnn.graphSAGE` (distributed)
 
 TuringDB can be the sampling engine for **distributed GNN training**. Each trainer worker (e.g. a DGL / PyTorch process under `torch.distributed`) opens its own TuringDB client. For every mini-batch, it asks the server for that batch's 3-hop GraphSAGE neighbourhood with **one** `CALL gnn.graphSAGE(...)`.
@@ -240,7 +273,7 @@ RETURN src_nodes0, tgt_nodes0, src_nodes1, tgt_nodes1, src_nodes2, tgt_nodes2
 ```
 
 `gnn.graphSAGE(seeds, fanouts, seed = null)`:
-- **`seeds`:** a **literal list of native node IDs** (the batch's seed nodes). Arguments must be constants, so build the list in Python. There is no key-property mode; map your keys to native IDs once (`RETURN id(n)`).
+- **`seeds`:** a list of **native node IDs** (the batch's seed nodes). Pass it as a parameter (`gnn.graphSAGE($seeds, $fanouts)`); the arguments can also be read from each row. There is no key-property mode; map your keys to native IDs once (`RETURN id(n)`). A seed that names no node fails with `Invalid node ID: <id>`.
 - **`fanouts`:** exactly **3** integers, one per hop, ordered **from the seeds outwards**: hop 0 samples the seeds' neighbours. DGL lists fanouts from the input layer to the seeds, so **reverse** them. Each fanout can be at most 65,536.
 - **`seed`:** an optional integer for reproducible sampling. Omit it for fresh randomness per batch.
 - **Yields, per hop `h` = 0, 1, 2:**
@@ -253,11 +286,15 @@ Building DGL blocks from one call (adapted from the reference implementation):
 ```python
 import dgl, numpy as np, torch
 
+COLS = ", ".join(f"{s}_nodes{h}" for h in range(3) for s in ("src", "tgt"))
+
 def sample_blocks(client, seed_ids: torch.Tensor, fanouts: list[int], num_nodes: int):
-    ids = seed_ids.tolist()                          # native node IDs, inlined as a literal list
+    ids = seed_ids.tolist()                          # native node IDs, as plain ints
     hop_fanouts = list(reversed(fanouts))            # DGL order (input→seeds) → seeds-outward
-    cols = ", ".join(f"{s}_nodes{h}" for h in range(3) for s in ("src", "tgt"))
-    df = client.query(f"CALL gnn.graphSAGE({ids}, {hop_fanouts}) YIELD {cols} RETURN {cols}")
+    df = client.query(
+        f"CALL gnn.graphSAGE($seeds, $fanouts) YIELD {COLS} RETURN {COLS}",
+        {"seeds": ids, "fanouts": hop_fanouts},
+    )
 
     def col(name):
         return torch.from_numpy(df[name].dropna().to_numpy(dtype=np.int64))
@@ -273,7 +310,7 @@ def sample_blocks(client, seed_ids: torch.Tensor, fanouts: list[int], num_nodes:
 ```
 
 **Distributed setup:**
-- **One client per worker:** each worker process creates its own `TuringDB(host=...)` client against the same server. Rank 0 can `load_graph` while the others tolerate "already loaded".
+- **One client per worker:** each worker process creates its own `TuringDB(host=..., port=...)` client against the same server. Rank 0 can `load_graph` while the others pass `raise_if_loaded=False`.
 - **Native IDs everywhere:** seeds, negative samples and train/test splits all use native node IDs. Broadcast the split from rank 0, or cache it as memory-mapped `.npy` files.
 - **Write-back:** write the trained embeddings with one `LOAD EMBEDDING` from a Parquet file (`node_id`, `embedding`). This is much faster than per-node `SET`.
 

@@ -9,7 +9,7 @@ These commands build graph data from external files. To load an existing on-disk
 
 External files must live in the **`data/` subdirectory** of the TuringDB working directory (`-turing-dir`, default `~/.turing`). Paths in these commands are resolved inside `data/`; even an absolute path is re-rooted there. All of the `LOAD …` commands are engine commands, so run them via `client.query(...)`. When an import fails, the details are written to `<turing-dir>/logs/turingdb.log`.
 
-> **Choosing a method by volume:** above roughly 5,000 nodes or 1,000 edges, **use `LOAD PARQUET`**, converting the source to Parquet first if needed. It loads 100k nodes + 200k edges in about 0.2 s. Cypher-driven loads that match edge endpoints by key property (LOAD CSV/UNWIND + `MATCH (a {pid: …})` + CREATE) need minutes for a few thousand edges and do not finish at that size. Convert CSV, JSON or DataFrames to the `__id`/`__labels` Parquet schema with pandas/pyarrow rather than streaming them through Cypher. Keep `LOAD CSV` for small files. To add many edges to an existing graph, batch them as native node ID pairs (see `writing.md`).
+> **Choosing a method by volume:** above roughly 5,000 nodes or 1,000 edges, **use `LOAD PARQUET`**, converting the source to Parquet first if needed. It loads 200k nodes + 400k edges in about 0.3 s, in one step, with no change to manage. Convert CSV, JSON or DataFrames to the `__id`/`__labels` Parquet schema with pandas/pyarrow rather than streaming them through Cypher. Keep `LOAD CSV` for small files. To add data to an existing graph, use `UNWIND $rows` and, for edges, native node ID pairs (see `writing.md`).
 
 | Source | Command | Creates |
 |--------|---------|---------|
@@ -68,9 +68,12 @@ Every other column becomes a property:
 | `bool` | Boolean |
 | `string` | String |
 | timestamp | DateTime |
+| WKB geometry of points (GeoParquet) | Point |
 | list of the types above | List |
 
 Nulls are allowed. **`int32` and `float32` columns are rejected** ("Unsupported column type"), so cast them to int64 / float64 first.
+
+**Points:** a geometry column is read as points with no extra clause, if it has Parquet's `GEOMETRY` or `GEOGRAPHY` logical type or is named in the `geo` metadata of a GeoParquet file, in WKB encoding. Its values must be 2D or 3D points. With the default CRS (`OGC:CRS84` / `EPSG:4326`) they load as WGS-84 points, and with `"crs": null` as cartesian points.
 
 - **New graph only:** the target graph name must not already exist. To grow an existing graph by a large amount, rebuild it from Parquet under a new name.
 - **IDs:** `__id` values are your own int64 keys. Edges reference them through `__source`/`__target`.
@@ -196,7 +199,10 @@ LOAD JSONL 'mydata.jsonl' AS mygraph
   WITH EMBEDDINGS [{"emb", 384}, {"summary_vec", 768}]   // array → Embedding (dimension > 1)
   WITH DATETIMES [born, updatedAt]                      // ISO string → DateTime
   WITH DURATIONS [tenure]                               // integer microseconds → Duration
+  WITH POINTS [location]                                // {"longitude":…, "latitude":…} or {"x":…, "y":…} → Point
 ```
+
+A property can be declared with one type only. For `WITH POINTS`, the object takes the keys `point()` takes, and a JSON `null` leaves the property unset.
 
 ## LOAD GML
 
@@ -229,10 +235,12 @@ client.query("LOAD JSONL 'output.json' AS mygraph")
 
 (Neo4j 4.x databases must be migrated to the 5.x format with `neo4j-admin database migrate` before exporting.)
 
-Most Neo4j read queries port directly to TuringDB v3. Review them for the differences listed in `SKILL.md`:
-- **Parameters:** `$params` work only as labels and edge types, so inline values.
-- **Maps and functions:** there is no map projection, no regex, and no `rand()` / `date()` / `elementId()`.
+Most Neo4j queries port directly to TuringDB 3.1, parameters and map projections included. Review them for the differences listed in `SKILL.md`:
+- **Parameters:** not in `SKIP` / `LIMIT`. Watch the plan of `WHERE n IN $ids` and of a per-row `MATCH` by key from `UNWIND $list` (see `querying.md`).
+- **Functions:** there is no regex, and no `rand()` / `date()` / `timestamp()`. `elementId()` returns an integer, the same as `id()`.
+- **Writes:** labels can't change after creation (`SET n:Label`), and there are no constraints.
 - **Shortest path:** the syntax is different (see `algorithms.md`).
+- **Distances:** `point.distance` uses the Earth's mean radius, so it gives distances about 0.11% shorter than Neo4j's.
 
 ## After importing
 
