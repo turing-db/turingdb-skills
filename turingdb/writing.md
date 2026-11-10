@@ -1,6 +1,6 @@
 ---
 name: turingdb-writing
-description: Use when creating or updating data in TuringDB v3 (to build a new graph beyond a few thousand entities, use LOAD PARQUET instead; see importing.md) — CREATE, MERGE, SET, REMOVE, DELETE/DETACH DELETE, FOREACH, conditional writes, bulk edges between existing nodes by native ID pairs, bulk writes with UNWIND/LOAD CSV, property indexes, and the mandatory change/commit/submit workflow (including when COMMIT is required and how conflicts behave).
+description: Use when creating or updating data in TuringDB v3.1 (to build a new graph beyond a few thousand entities, use LOAD PARQUET instead; see importing.md) — CREATE, MERGE, SET (incl. SET n = map / n += map), REMOVE, DELETE/DETACH DELETE, FOREACH, conditional writes, bulk writes with UNWIND over parameters, bulk edges between existing nodes by native ID pairs, LOAD CSV, property indexes, and the mandatory change/commit/submit workflow (including when COMMIT is required and how conflicts behave).
 ---
 
 # TuringDB: Writing Data
@@ -76,8 +76,10 @@ CREATE (a)-[:KNOWS {since: 2021}]->(b)
 RETURN a.name, b.name
 ```
 
+**Values from parameters:** pass the data, not query text: `client.query("CREATE (:Person {name: $name, age: $age})", {"name": "O'Brien", "age": 41})`, or a whole property map with `CREATE (n:Person) SET n = $props`.
+
 **Rules:**
-- **Labels and edge types:** every node needs at least one label, and every edge exactly one edge type. Two types (`[:A:B]`) is a parse error.
+- **Labels and edge types:** every node needs at least one label, and every edge exactly one edge type. `[:A:B]` fails with "An edge in a write pattern takes exactly one edge type, with no '|', '&', ':' or '!'".
 - **Label syntax:** labels in a write pattern can only be joined by `:` or `&` (`CREATE (n:A&B)`), not `|` or `!`. A label or an edge type can come from a parameter: `client.query("CREATE (n:$lbl {x: 1})", {"lbl": "Item"})`.
 - **Labels are fixed at creation.** `SET n:Label` and `REMOVE n:Label` are not supported.
 - **Property types are global.** Each property name has **one value type across the whole graph** (see `CALL db.propertyTypes()`). If `age` is an Integer, `CREATE (:X {age: 'old'})` and `SET n.age = 2.5` both fail with `types … are incompatible`. There is no Int → Double widening.
@@ -126,12 +128,15 @@ MATCH (n) WHERE n = 1234 SET n.flag = true                                      
 UNWIND [12, 34, 56] AS x MATCH (n) WHERE n = x SET n.flag = true                    // batch: literal, distinct node IDs
 MATCH (n:Person {name: 'Alice'}) SET n.age = null                                  // clear a value
 MATCH (n:Person {name: 'Alice'}) REMOVE n.score, n.flag                            // remove properties
+MATCH (n:Person {name: 'Alice'}) SET n += {city: 'Berlin', score: 1.5}             // add / update from a map
+MATCH (c:Company {name: 'Acme'}) SET c = {name: 'Acme Corp', size: 10}             // replace all properties
+UNWIND $rows AS row MATCH (n) WHERE n = row.id SET n += row.props                  // bulk update by native ID
 ```
 
+- **`SET n += map`** adds and updates properties, and **`SET n = map`** replaces them all. A key set to `null` removes its property. The map can be a literal, a parameter or a map read from a row.
+
 **Not supported:**
-- `SET n += {…}` fails with "SET cannot dynamically mutate properties yet".
-- `SET n = {…}` is a parse error.
-- `SET n:Label` ("SET cannot update entity types yet") and `REMOVE n:Label` fail.
+- `SET n:Label` ("SET cannot update entity types yet") and `REMOVE n:Label` ("Not implemented: REMOVE of a label").
 - Aggregates directly in SET (`SET n.c = count(*)`). Compute them in a `WITH` first.
 
 > **Embedding literals use parentheses `( )`**: `(1.2, 2.0, 0.0)`. Square brackets `[...]` are a list literal — a different type. Embedding literals need at least 2 numeric items.
@@ -171,15 +176,22 @@ MATCH (n:Person {name: 'Alice'}) RETURN n NEXT WHEN n.age > 18 THEN CREATE (:Adu
 
 **Choose the method by what you are writing:**
 
+Measured on TuringDB 3.1, on a 200k-node, 400k-edge graph (server-side time, then the client round trip):
+
 | Writing… | Use | Measured |
 |---|---|---|
-| A **new graph** beyond roughly 5,000 nodes or 1,000 edges | `LOAD PARQUET` (see `importing.md`) | 100k nodes + 200k edges in **0.2 s** |
-| **Edges between existing nodes** | `UNWIND` of native node ID pairs, about 10,000 pairs per query (below) | 10,000 edges in **45 ms** on a 200k-node graph |
-| **Embeddings** for existing nodes | `LOAD EMBEDDING` (see `algorithms.md`) | 20,000 × 384-d in 0.1 s |
-| A few thousand new nodes | `UNWIND` over an inlined list | 100k nodes in 0.2 s |
-| Edges by **key property** (`MATCH (a:P {pid: row.src})`) | **avoid**: map keys to native IDs first | 1,000 edges take about 7.5 s on 200k nodes: each row scans the label once per endpoint, index or not |
+| A **new graph** beyond roughly 5,000 nodes or 1,000 edges | `LOAD PARQUET` (see `importing.md`) | 200k nodes + 400k edges in **0.3 s** |
+| **Edges between existing nodes** | `UNWIND $pairs` of native node ID pairs, 10,000–20,000 per query (below) | 20,000 edges in **3 ms** / 10 ms |
+| **New nodes** | `UNWIND $rows AS row CREATE (…)`, 10,000–20,000 rows per query | 20,000 nodes in 4 ms / 60 ms |
+| Generated nodes | `UNWIND range(1, 100000) AS i CREATE (:Num {v: i})` | 100k nodes in 3 ms |
+| **Embeddings** for existing nodes | `LOAD EMBEDDING` (see `algorithms.md`) | 20,000 × 384-d in 0.1 s (3.0) |
+| Updates by **native ID** | `UNWIND $rows AS row MATCH (n) WHERE n = row.id SET n += row.props` | 1,000 nodes in 1 ms |
+| Upserts by **key property** | `UNWIND $rows AS row MERGE (n:P {pid: row.pid}) SET …` | 1,000 rows in 41 ms |
+| Lookups by key property, one `MATCH` per row from a parameter list (`UNWIND $rows … MATCH (n:P {pid: row.pid})`) | **avoid**: map keys to native IDs, or use `MERGE` when the keys exist | 1,000 rows take 1.7–2.7 s: the label is scanned for every row, index or not |
 
-`LOAD PARQUET` always creates a **new graph**; it cannot append to an existing one. To add a large volume of nodes to an existing graph, create them with `UNWIND`, then `COMMIT`, read back their native IDs, and add their edges by ID pairs.
+The same data written into the query text as literals is slower to send and to parse: 10,000 ID pairs take 34 ms inlined against 3 ms as a parameter. Parameters also need no escaping.
+
+`LOAD PARQUET` always creates a **new graph**; it cannot append to an existing one. To add a large volume of nodes to an existing graph, create them with `UNWIND $rows`, `COMMIT`, read back their native IDs, and add their edges by ID pairs.
 
 ### Bulk edges between existing nodes
 
@@ -187,44 +199,48 @@ Get the native node IDs once (`RETURN id(n)` alongside your business key), map y
 
 ```python
 ids = client.query("MATCH (n:Person) RETURN n.pid AS pid, id(n) AS id")
-key_to_id = dict(zip(ids["pid"].tolist(), ids["id"].tolist()))   # .tolist(): plain ints, not np.int64(...) in the f-string
+key_to_id = dict(zip(ids["pid"].tolist(), ids["id"].tolist()))   # .tolist(): plain ints (numpy ints are refused as parameters)
 pairs = [[key_to_id[s], key_to_id[t]] for s, t in edge_list]
 
 client.new_change()
 for i in range(0, len(pairs), 10_000):                       # stay well under the 1 MiB request limit
-    batch = pairs[i:i + 10_000]
-    client.query(f"UNWIND {batch} AS p "
-                 "MATCH (a) WHERE a = p[0] MATCH (b) WHERE b = p[1] "
-                 "CREATE (a)-[:KNOWS]->(b)")
+    client.query(
+        "UNWIND $pairs AS p "
+        "MATCH (a) WHERE a = p[0] MATCH (b) WHERE b = p[1] "
+        "CREATE (a)-[:KNOWS]->(b)",
+        {"pairs": pairs[i:i + 10_000]},
+    )
 client.query("CHANGE SUBMIT")
 client.checkout()
 ```
 
-- **Plan shape:** the plan is `unwind_const` → `fetch_nodes` × 2 → `create_edge`, with no scan. Check it with `EXPLAIN (db)` on a small batch.
-- **Edge properties:** add them to each row: `UNWIND [[12, 34, 2021], …] AS p … CREATE (a)-[:KNOWS {since: p[2]}]->(b)`. If a row mixes types (an ID and a string), convert on read: `{role: toString(p[2])}`.
-- **Request size:** a request over 1 MiB fails with `REQUEST_TOO_BIG`. 10,000 pairs of 6-digit IDs take about 170 KB.
+- **Plan shape:** the plan is `unwind` → `fetch_nodes` × 2 → `create_edge`, with no scan. Check it with `EXPLAIN (db)` on a small batch.
+- **Edge properties:** add them to each row: `[[12, 34, 2021], …]` with `CREATE (a)-[:KNOWS {since: p[2]}]->(b)`, or use map rows: `UNWIND $rows AS r MATCH (a) WHERE a = r.src MATCH (b) WHERE b = r.dst CREATE (a)-[:KNOWS {since: r.since}]->(b)`.
+- **Request size:** the request, parameters included, must fit in 1 MiB, which is about 38,000 pairs of 7-digit IDs. If the SDK refuses a batch as too big, **create a new client**: the old one fails every later parameterized query (`Unknown CellTag.`, possibly a segfault), even after `reconnect()`.
 
 ### Small-volume patterns
 
-There are no value parameters, so the data goes into the query text as literals.
+Pass the data as a parameter and `UNWIND` it:
 
-**UNWIND over inlined lists:**
+```python
+client.query("UNWIND $names AS nm MERGE (:City {name: nm})", {"names": ["Brest", "Rennes", "Nantes"]})
+
+rows = [{"name": "Brest", "pop": 139000}, {"name": "O'Brien Town", "pop": 1200}]
+client.query("UNWIND $rows AS row CREATE (:City {name: row.name, pop: row.pop})", {"rows": rows})
+
+# upsert by key: MERGE runs as one merge step (1,000 rows in ~40 ms); a per-row MATCH by key would scan
+client.query("UNWIND $rows AS row MERGE (c:City {name: row.name}) SET c.pop = row.pop", {"rows": rows})
+```
 
 ```cypher
 UNWIND range(1, 1000) AS i CREATE (:Num {v: i})
-UNWIND ['Brest', 'Rennes', 'Nantes'] AS nm MERGE (:City {name: nm})
-// Rows as maps: convert each field (map values are type-erased)
-UNWIND [{name: 'Brest', pop: 139000}, {name: 'Rennes', pop: 220000}] AS row
-CREATE (:City {name: toString(row.name), pop: toInteger(row.pop)})
-// Rows as mixed-type lists: same rule
-UNWIND [['Brest', 139000], ['Rennes', 220000]] AS row CREATE (:City {name: toString(row[0]), pop: toInteger(row[1])})
-// Rows of same-typed values need no conversion:
-UNWIND [['Brest', 'FR-29'], ['Rennes', 'FR-35']] AS row CREATE (:City {name: row[0], code: row[1]})
+UNWIND [['Brest', 139000], ['Rennes', 220000]] AS row CREATE (:City {name: row[0], pop: row[1]})
 ```
 
-**Type-erased values:** a value read from a map (`row.name`) or from a mixed-type list (`row[1]`) has type Any. Writing it straight into a property fails with "types 'String' and 'Any' are incompatible". Wrap it in `toString()`, `toInteger()`, `toFloat()` or `toBoolean()`.
+- **Values keep their types.** Values read from maps (`row.name`) and from mixed-type lists (`row[1]`) are written as they are. A new property takes the type of its values, and a value of the wrong type for an existing property fails with `Cannot set a property of type 'Int64' to a value of type 'String'`.
+- **Never format values into the query** (f-strings, `%`, string concatenation): use parameters. Only `SKIP` / `LIMIT` and vector-search vectors still need literals.
 
-**LOAD CSV**, for small files. Its edge pass matches endpoints by key property, which gets slow fast (see the table above). The file must be under `<turing-dir>/data/`, and all fields are strings:
+**LOAD CSV**, for small files. The file must be under `<turing-dir>/data/`, and all fields are strings. Its key-property joins run as hash joins (1,000 edges in 12 ms on a 200k-node graph), but `LOAD PARQUET` is still the way to build a large graph:
 
 ```cypher
 // 1. nodes
@@ -248,21 +264,7 @@ CREATE (a)-[:KNOWS {since: toInteger(row.since)}]->(b)
 
 Write-only `CALL { … }` subqueries work too: `UNWIND [1, 2] AS i CALL { WITH i CREATE (:X {v: i}) }`.
 
-**Building the Cypher text in Python.** Escape quotes yourself, since values can't be passed as parameters:
-
-```python
-def lit(v):
-    if isinstance(v, str):
-        return "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return repr(v)
-
-names = ["Alice", "O'Brien"]
-client.query(f"UNWIND [{', '.join(lit(n) for n in names)}] AS nm MERGE (:Person {{name: nm}})")
-```
-
-Keep each request under 1 MiB (bigger ones fail with `REQUEST_TOO_BIG`). To build a new graph, use `LOAD PARQUET` (see the table at the top of this section).
+Keep each request under 1 MiB. To build a new graph, use `LOAD PARQUET` (see the table at the top of this section).
 
 ## Engine Commands for Change Management
 
@@ -308,6 +310,7 @@ client.checkout()
 - Call `client.checkout()` after `CHANGE SUBMIT`, or the next query fails with `CHANGE_NOT_FOUND`.
 - New entities are invisible to a later MATCH in the same change until `COMMIT`. The MATCH silently finds nothing. MERGE does see them.
 - Labels can't be changed after creation. Nodes need at least one label, and edges exactly one type.
-- Each property name has a single type graph-wide. Values read from maps or mixed-type lists need a `toString()`/`toInteger()`/… before they can be stored.
-- There are no value `$parameters`, `SET +=`, `SET n:Label`, or constraints.
-- For many edges between existing nodes, use native ID pairs, never per-row key-property matches.
+- Each property name has a single type graph-wide, and Integer properties don't widen to Double.
+- Pass data as `$parameters`. Batches of 10,000–20,000 rows stay under the 1 MiB limit; after an oversized-parameter error, use a new client.
+- There is no `SET n:Label`, `REMOVE n:Label` or constraint.
+- For many edges between existing nodes, use native ID pairs. Don't match one key property per row from a parameter list.

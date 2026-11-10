@@ -1,68 +1,74 @@
 ---
 name: turingdb
 description: >
-  Start, query, write, and manage TuringDB (v3) columnar graph databases using the Python SDK and Cypher.
-  TRIGGER when: code imports `turingdb` or `TuringDB`; user mentions TuringDB, turing db, or turing database;
-  user asks about TuringDB Cypher queries, graph versioning with changes/commits, vector search in TuringDB,
+  Start, query, write, and manage TuringDB (v3.1) columnar graph databases using the Python SDK, the
+  JavaScript/TypeScript SDK and Cypher.
+  TRIGGER when: code imports `turingdb` or `TuringDB` (Python) or `TuringClient` from the `turingdb` npm package;
+  user mentions TuringDB, turing db, or turing database;
+  user asks about TuringDB Cypher queries, query parameters, graph versioning with changes/commits, vector search
+  or point/distance queries in TuringDB,
   GNN training / neighbourhood sampling from TuringDB (DGL, PyTorch, GraphSAGE),
-  or the `turingdb` CLI; files contain TuringDB connection strings (localhost:6666) or TuringDB SDK calls
-  (`client.query`, `client.new_change`, `client.load_graph`).
+  or the `turingdb` CLI; files contain TuringDB connection settings (localhost:6666) or TuringDB SDK calls
+  (`client.query`, `client.new_change`, `client.load_graph`, `client.queryData`).
   SKIP: generic graph/Neo4j/Cypher questions with no TuringDB mention; general database work unrelated to TuringDB.
 ---
 
 # TuringDB
 
-TuringDB is a columnar graph database with git-like versioning (changes, commits, time travel). **TuringDB v3** (`turingdb` 3.0.2 on PyPI) runs every query on a new MLIR-based engine and supports most of openCypher:
-- **Clauses:** OPTIONAL MATCH, WITH, UNWIND, UNION, MERGE, DETACH DELETE, REMOVE and FOREACH.
+TuringDB is a columnar graph database with git-like versioning (changes, commits, time travel). **TuringDB 3.1** (`turingdb` 3.1 on PyPI and npm) runs every query on an MLIR-based engine and supports most of openCypher:
+- **Clauses:** OPTIONAL MATCH, WITH, UNWIND, UNION, MERGE, DETACH DELETE, REMOVE, FOREACH, and `SET n = map` / `SET n += map`.
 - **Patterns:** label expressions (`:A|B`, `:!A`, `:A&B`), and variable-length and quantified path patterns.
-- **Expressions:** CASE, comprehensions and `reduce()`.
-- **Subqueries:** EXISTS, COUNT, COLLECT and CALL.
+- **Expressions:** CASE, comprehensions, `reduce()`, `allReduce()`, map projection (`n {.name, .age}`) and map access (`m['key']`, `m.a.b`).
+- **Subqueries:** EXISTS, COUNT, COLLECT and CALL, each holding any query (UNION, NEXT, WHEN).
 - **Query composition:** `WHEN … THEN … ELSE` conditional queries and `NEXT`.
-- **Functions:** the common string and math functions.
+- **Parameters:** `$name` for values, labels and edge types.
+- **Types:** DateTime, Duration, Embedding and Point (cartesian or WGS-84, with haversine distances).
 
-Aggregation uses implicit grouping, and there are DateTime/Duration types. The Python SDK's `query()` returns pandas DataFrames.
+Aggregation uses implicit grouping. The Python SDK's `query()` returns pandas DataFrames.
 
 ## Setup
 
-**Default: connect to a running TuringDB server over HTTP.** The server listens on `http://localhost:6666` by default. If it isn't running, start one with the `turingdb` CLI (see `startup.md`).
+**Default: connect to a running TuringDB server.** Clients speak TuringDB's binary protocol over HTTP/1.1, to `localhost:6666` by default. If no server is running, start one with the `turingdb` CLI (see `startup.md`).
 
 ```python
-from turingdb import TuringDB          # pip/uv package: turingdb>=3.0.2
+from turingdb import TuringDB          # pip/uv package: turingdb>=3.1
 
-client = TuringDB(host="http://localhost:6666")   # HTTP/JSON client (the default backend)
+client = TuringDB(host="localhost", port=6666)   # or TuringDB(); host is a name or IP, never a URL
 client.create_graph("my_graph")  # create a new graph
 # or
 client.load_graph("my_graph")    # load an existing on-disk graph by name
 client.set_graph("my_graph")     # make it active
 ```
 
-`TuringDB(...)` has three backends, chosen with `type`:
-- `"json"`: HTTP, the default. Pass `host=`.
-- `"native"`: binary protocol. Needs a server started with `USE_TURING_PROTO=1`.
+`TuringDB(...)` has two backends, chosen with `type`:
+- `"native"`: a running server, over the binary protocol. The default. Pass `host=` and `port=`.
 - `"embedded"`: in-process, no server. Pass `data_dir=`.
 
-Use the **server** (`json`) by default. If the server was started with `-auth-on`, pass `token=` (or set `TURINGDB_AUTH_TOKEN`). See `startup.md`.
+Use the **server** by default. If it was started with `-auth-on`, pass `token=` (or set `TURINGDB_AUTH_TOKEN`). The JSON/HTTP API of 3.0 is gone: `curl` can't query the server, and `type="json"` no longer exists. For JavaScript or TypeScript, use the `turingdb` npm package (`TuringClient`). See `startup.md`.
 
 ## TuringDB Cypher vs Neo4j Cypher: what to know before writing queries
 
-- **Query parameters only name labels and edge types.** `client.query(q, {"lbl": "Person", "t": "KNOWS"})` fills `MATCH (n:$lbl)-[r:$t]->()` and `CREATE (n:$lbl)`. A `$x` used as a **value** (in WHERE, a property map, SET or RETURN) still fails with "Not implemented: Parameters", so inline literal values into the query text and escape quotes.
-- **Bulk data: `LOAD PARQUET` builds graphs, ID-pair `UNWIND` adds edges.**
-  - **New graph:** above roughly 5,000 nodes or 1,000 edges, write the data to Parquet and run `LOAD PARQUET`. It builds a new graph in well under a second (see `importing.md`).
-  - **Edges between existing nodes:** batch **native node ID pairs** into one `UNWIND`: `UNWIND [[12, 34], …] AS p MATCH (a) WHERE a = p[0] MATCH (b) WHERE b = p[1] CREATE (a)-[:R]->(b)`. That creates 10,000 edges in about 45 ms (see `writing.md`).
-  - **Never** match edge endpoints by a key property per row (`{pid: p[0]}`). Each row scans the whole label, so 1,000 pairs take about 7.5 s on 200k nodes.
+- **Pass values as parameters.** `client.query("MATCH (n:Person) WHERE n.age >= $min RETURN n.name", {"min": 30})`. A `$name` stands for a value anywhere an expression goes, and also for a label or an edge type (`MATCH (n:$lbl)`). Never format values into the query text.
+  - **Not yet:** `SKIP $n` / `LIMIT $n` ("Unsupported expression in SKIP/LIMIT: PARAMETER") and the vector of a `VECTOR SEARCH`. Write those as literals.
+  - **Size:** parameters count toward the 1 MiB request limit, which is about 38,000 pairs of 7-digit IDs. Batch 10,000–20,000 rows per query. **After the SDK refuses oversized parameters, that client fails every later parameterized query** (`Unknown CellTag.`, and it can segfault). `reconnect()` doesn't fix it, so create a new `TuringDB` client.
+- **Parameter lists: two planner traps.** Both look natural and both scan:
+  - `MATCH (n) WHERE n IN $ids` scans every node (87 ms for 1,000 IDs on 200k nodes). Use `UNWIND $ids AS x MATCH (n) WHERE n = x` (about 3 ms). A literal `IN [1, 2, 3]` is a direct fetch.
+  - `UNWIND $keys AS x MATCH (n:P {pid: x})` (or `$rows` with `r.pid`) scans the label for every row, index or not: 1.7–2.7 s for 1,000 keys on 200k nodes. Map keys to native IDs first, or fetch the nodes with `MATCH (n:P) WHERE n.pid IN $keys` (one scan, 79 ms). `MERGE` by key, LOAD CSV joins and two-endpoint key matches are hash-joined and fast.
+- **Bulk data: `LOAD PARQUET` builds graphs, `UNWIND $pairs` adds edges.**
+  - **New graph:** above roughly 5,000 nodes or 1,000 edges, write the data to Parquet and run `LOAD PARQUET`. It builds 200k nodes and 400k edges in about 0.3 s (see `importing.md`).
+  - **Edges between existing nodes:** batch **native node ID pairs** as one parameter: `UNWIND $pairs AS p MATCH (a) WHERE a = p[0] MATCH (b) WHERE b = p[1] CREATE (a)-[:R]->(b)`. That creates 20,000 edges in about 10 ms (see `writing.md`).
+  - **New nodes:** `UNWIND $rows AS row CREATE (:City {name: row.name, pop: row.pop})` writes 20,000 nodes in about 60 ms. Values read from maps and lists are stored as they are, with no `toString()` / `toInteger()` needed.
   - **Embeddings for existing nodes:** use `LOAD EMBEDDING` from a Parquet file, not `SET` loops (see `algorithms.md`).
 - **Writes need a change.** Run them as: `client.new_change()` → writes → `CHANGE SUBMIT` → `client.checkout()`. Inside a change, nodes created by an earlier query are invisible to a later **MATCH** until you run `COMMIT`. MERGE does see them. See `writing.md`.
-- **Address known nodes by native node ID:** `MATCH (n) WHERE n = 123` (or `id(n) = 123`) is a constant scan of exactly that node.
-  - **Batches:** `UNWIND <list of IDs> AS x MATCH (n) WHERE n = x` fetches each node directly, at about 3 µs per node. The list can be a literal, a `WITH` variable, `collect(...)` or `range(...)`, and IDs from the same row (`a = p[0] AND b = p[1]`) work too.
-  - **Slow forms:** `WHERE n IN [...]` scans every node. Looking nodes up through a user-level key property per row (`UNWIND keys … {pid: x}`) is about 100× slower than by ID. See `querying.md`.
-- **`RETURN n` returns an integer node ID, not a property map.** Use `properties(n)` for the map, `keys(n)` for the property names, or return the properties you need (`n.name, n.age`). Map projection `n{.name}` / `n{.*}` is not supported.
-- **Function library gaps.** The common string and math functions exist: `toUpper`, `substring`, `split`, `replace`, `trim`, `left`, `right`, `abs`, `round`, `floor`, `sqrt`, `log` and more, plus `reduce()` and `stDev`/`percentileCont`. Still missing: `=~` regex, `rand()`, `date()`, `timestamp()`, `elementId()`, `round(x, digits)` and `/* */` comments. See `querying.md` for the full list.
-- **Reading maps:** `m.key`, `m[k]` with a variable key, and `properties(n).name` all work. A literal key in brackets (`m['key']`) is rejected; write `m.key`. Map values are type-erased: wrap them in `toString()` / `toInteger()` / `toFloat()` before writing them as properties.
+- **Address known nodes by native node ID:** `MATCH (n) WHERE n = 123` (or `id(n) = 123`) is a constant scan of exactly that node. `UNWIND $ids AS x MATCH (n) WHERE n = x` fetches each node directly. Write `n = x`, not `id(n) = x`: against a parameter, the `id(n)` form scans every node (653 ms for 1,000 IDs, against 0.2 ms). Check plans with `EXPLAIN (db)`: `const_scan_nodes` / `fetch_nodes` / `hash_join` are good, while `scan_nodes…` followed by `unwind` or a filter is a scan. See `querying.md`.
+- **`RETURN n` returns an integer node ID, not a property map.** Use a map projection (`n {.name, .age}`, `n {.*}`), `properties(n)`, or return the properties you need (`n.name, n.age`). A path comes back as a flat list of IDs, node and edge alternating.
+- **Function library gaps.** The common string, math, list and temporal functions exist, as do `elementId`, `isEmpty`, `coll.indexOf`, `point.distance` and `point.withinBBox`. Still missing: `=~` regex, `rand()`, `date()`, `timestamp()`, `atan2()`, `isNaN()` and `round(x, digits)`. `exists(n.prop)` is refused: write `n.prop IS NOT NULL`. See `querying.md` for the full list.
 - **Labels are fixed at creation.** `SET n:Label` and `REMOVE n:Label` are unsupported. Every node needs at least one label, and every edge exactly one type.
+- **Property types are global.** Each property name has one value type across the graph, and Integer properties don't widen to Double.
 - **Shortest path:** only TuringDB's statement `shortestPath(a, b, weightProp, dist, path)` exists. `shortestPath((a)-[*]-(b))` does not. See `algorithms.md`.
 - **Numeric equality.** `Integer = Double` compares exact values (`n.age = 30.0` matches 30). `Double = Double` is still rejected: use `<` / `>` ranges.
-- **Function names are case-insensitive** (`AVG` = `avg`), and so are keywords. Labels, edge types and property names are case-sensitive.
-- **One statement per request.** `;`-separated scripts are rejected. Comments are `//` only; `--` and `/* */` are not comments.
+- **Function names are case-insensitive** (`AVG` = `avg`), and so are keywords. Labels, edge types and property names are case-sensitive. Keywords can be names (`RETURN n.name AS count`).
+- **One statement per request.** `;`-separated scripts are rejected; chain steps with `NEXT`. Comments are `//` and `/* */`; `--` is not a comment.
 
 ## Routing
 
@@ -70,11 +76,11 @@ Based on what the user is asking, immediately read the matching file from this s
 
 | Task | File |
 |------|------|
-| Install, start/stop a server, connect (HTTP, auth, embedded), load/create a graph | `startup.md` |
-| Reading data: MATCH, label expressions, OPTIONAL MATCH, WHERE, paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps, subqueries, functions, parameters, LOAD CSV | `querying.md` |
-| Writing data: CREATE, MERGE, SET, REMOVE, DELETE, FOREACH, bulk edges by native ID, the change/commit workflow, indexes | `writing.md` |
+| Install, start/stop a server, connect (Python native or embedded, auth), the JavaScript/TypeScript client, load/create a graph | `startup.md` |
+| Reading data: MATCH, label expressions, OPTIONAL MATCH, WHERE, paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps, subqueries, functions, points, parameters, LOAD CSV | `querying.md` |
+| Writing data: CREATE, MERGE, SET (incl. from a map), REMOVE, DELETE, FOREACH, bulk writes with parameters, bulk edges by native ID, the change/commit workflow, indexes | `writing.md` |
 | Importing external data: CSV, JSONL, GML, Parquet (`LOAD PARQUET` and `turing-parquet`), Neo4j migration | `importing.md` |
-| Paths and algorithms: shortest path, variable-length paths, vector/embedding search, writing embeddings back (`LOAD EMBEDDING`), distributed GNN training with `gnn.graphSAGE` sampling | `algorithms.md` |
-| Exploring an unfamiliar graph, procedures, versioning/time travel, SDK reference | `introspection.md` |
+| Paths and algorithms: shortest path, variable-length paths, vector/embedding search, writing embeddings back (`LOAD EMBEDDING`), geographic distances, distributed GNN training with `gnn.graphSAGE` sampling | `algorithms.md` |
+| Exploring an unfamiliar graph, procedures, versioning/time travel, SDK reference, result types, errors | `introspection.md` |
 
 If the task spans multiple areas (e.g. connect then query), read the files in sequence.

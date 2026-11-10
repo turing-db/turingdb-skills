@@ -1,58 +1,60 @@
 ---
 name: turingdb-startup
-description: Use when connecting to TuringDB before querying — installs the package, starts/stops a TuringDB server, connects over HTTP (with optional auth token), or runs the engine in-process (embedded), then loads/creates a graph ready for exploration.
+description: Use when connecting to TuringDB before querying — installs the package, starts/stops a TuringDB server, connects from Python over the binary protocol (with optional auth token) or runs the engine in-process (embedded), connects from JavaScript/TypeScript with the turingdb npm package, then loads/creates a graph ready for exploration.
 ---
 
 # TuringDB: Startup & Connection
 
-By default, connect to a running TuringDB **server** over HTTP. The SDK uses this backend unless told otherwise, and the following all require it: the browser visualizer, on-disk graph discovery, concurrent multi-process access, and S3 transfers. If you want a self-contained engine with no server to manage, use the in-process (embedded) backend instead (see the last section).
+By default, connect to a running TuringDB **server**. The SDK uses this backend unless told otherwise, and the following all require it: the browser visualizer, concurrent multi-process access, S3 transfers and the JavaScript client. If you want a self-contained engine with no server to manage, use the in-process (embedded) backend instead (see the last section).
 
 ## Step 1 — Ensure turingdb is installed
 
 ```bash
-uv add 'turingdb>=3.0.2'
+uv add 'turingdb>=3.1'
 ```
 
 If the project doesn't use uv:
 
 ```bash
-pip install 'turingdb>=3.0.2'
+pip install 'turingdb>=3.1'
 ```
 
-The wheel (Python 3.10–3.14; Linux x86_64/aarch64, macOS arm64) includes:
+The wheel (Python 3.10–3.14; Linux x86_64/aarch64, macOS 15+ arm64) includes:
 - the `turingdb` CLI (server and interactive shell),
 - the `turing-parquet` import tool,
 - the in-process engine,
 - the bundled `greeter` example extension.
 
-Pin `>=3.0.2`. That release adds the features this skill describes beyond 3.0: label/edge-type parameters, label expressions, string and math functions, `NEXT`, `WHEN`, `FOREACH` and `COLLECT {}`, among others. Older projects may pin `1.x`, which uses the previous engine and a much smaller Cypher subset.
+Pin `>=3.1`. It adds value parameters, the binary protocol by default, map projection, points, `allReduce` and more over 3.0.2. Older projects may pin `1.x`, which uses the previous engine and a much smaller Cypher subset.
 
-**Client and server versions must match across the 3.0.2 boundary.** From 3.0.2, the SDK sends each query as a JSON body (see Raw HTTP below), and the server accepts nothing else. An older SDK against a 3.0.2 server gets `PARSE_ERROR: The request body must be a JSON object`, so upgrade both together.
+**Client and server versions must match across the 3.1 boundary.** A 3.1 client speaks the binary protocol of a 3.1 server, so upgrade the SDKs and the server together, then restart the server. A mismatch shows up as:
+- `httpx.HTTPStatusError: Client error '400 Bad Request' …`: a Python SDK older than 3.1 against a 3.1 server.
+- `Proto header dataLen does not match chunk payload size`: a 3.1 Python SDK against an older server.
+- `PROTOCOL_ERROR: A packet payload of … bytes is more than the 67108864 bytes …`: a 3.1 JavaScript SDK against an older server.
 
 ## Step 2 — Connect to a server
 
-Connect to a running TuringDB server — it may already be running. `host` is the full URL, not a host+port pair.
+Connect to a running TuringDB server — it may already be running. `host` is a host name or an IP address and `port` a number. A URL is refused: `host must be a host name or IP address, not a URL`.
 
 ```python
 from turingdb import TuringDB
 
-client = TuringDB(host="http://localhost:6666")   # HTTP/JSON client (the default backend)
-client.list_loaded_graphs()                        # raises if the server isn't reachable
+client = TuringDB(host="localhost", port=6666)   # same as TuringDB()
 ```
 
-If nothing is listening on that port, start a server first ("Starting a server" below), then connect.
-- **`httpx` exceptions:** connection failures, and HTTP errors without a JSON body such as 401.
-- **`TuringDBException`:** query errors, and HTTP errors the server explains in JSON, such as `REQUEST_TOO_BIG` (HTTP 413).
+The client connects as soon as it is created. If nothing is listening, it raises `TuringDBException: Failed to connect to localhost:6666: Connection refused`; start a server first ("Starting a server" below), then connect.
+
+Every failure raises `TuringDBException`, query errors and connection errors alike (the SDK no longer uses `httpx`).
 
 ### Authentication
 
 A server started with `-auth-on` requires a bearer token. Pass it with `token=`, or set the `TURINGDB_AUTH_TOKEN` env var, which the SDK reads automatically:
 
 ```python
-client = TuringDB(host="http://localhost:6666", token="s3cret")
+client = TuringDB(host="localhost", port=6666, token="s3cret")
 ```
 
-A missing or wrong token gets an HTTP 401 with an empty body, raised as `httpx.HTTPStatusError`. Raw HTTP clients send `Authorization: Bearer <token>`.
+A missing or wrong token raises `TuringDBException: Protocol error from server: Unauthorized: missing or invalid authentication token`.
 
 ## Step 3 — Create or load a graph
 
@@ -67,7 +69,7 @@ client.set_graph("my_graph")      # make it the active graph
 print("Loaded:", client.list_loaded_graphs())
 ```
 
-To discover on-disk graphs you haven't loaded yet, use `client.list_available_graphs()`. It is only available on the server's `json` backend, not in embedded mode. There is no command to drop or unload a graph.
+To discover on-disk graphs you haven't loaded yet, use `client.list_available_graphs()` (any backend). There is no command to drop or unload a graph.
 
 ## Step 4 — Explore the graph
 
@@ -90,9 +92,9 @@ Start a server with the `turingdb` CLI if one isn't already running. `turingdb` 
 | Flag | Meaning |
 |------|---------|
 | `-turing-dir <path>` | Root data directory (contains `graphs/`, `data/`, `vector/`, `logs/`). Default `~/.turing` |
-| `-demon` | Run as a background daemon. Without it, `start` serves HTTP **and** opens an interactive shell |
+| `-demon` | Run as a background daemon. Without it, `start` serves queries **and** opens an interactive shell |
 | `-load <graph>` | Load a graph at startup (repeatable) |
-| `-p <port>` | Listen port (default 6666) |
+| `-p <port>` | Listen port (default 6666). Use another port, e.g. 6686, for Node.js clients (see below) |
 | `-i <addr>` | Listen address (default localhost) |
 | `-in-memory` | Don't persist graphs to disk |
 | `-reset-default` | Reset the content of the `default` graph |
@@ -133,25 +135,53 @@ Add `-timeout <ms>` (alias `-t <ms>`) to change how long `stop` waits for the pr
 `turingdb start` without `-demon` opens a Cypher shell on top of the server. Shell commands:
 - `cd <graph>`: switch graph.
 - `checkout change-<id>`, `checkout <commit>`, `checkout`: switch to a change, a commit, or back to HEAD.
-- `:param <name> => <json value>`: set a query parameter (`:param lbl => "Person"`). `SHOW PARAMETERS` lists them, and `:param clear` removes them all.
+- `:param <name> => <Cypher expression>`: set a query parameter (`:param lbl => 'Person'`, `:param ids => [0, 1, 2]`). `SHOW PARAMETERS` lists them, and `:param clear` removes them all.
 - `read <file>`, `help`, `quit` / `exit`.
 
 It is handy for manual exploration. Agents should use the SDK instead.
 
-### Raw HTTP
+### The wire protocol
 
-The SDK is a thin client over one endpoint. The request body is a **JSON object** with the query and optional parameters:
+The server speaks only TuringDB's **binary protocol over HTTP/1.1**; the JSON API of 3.0 was removed, so `curl` and other plain HTTP tools can't run queries. A query is one `POST /query?graph=<g>[&change=<id>][&commit=<hash>]` with `Content-Type: application/turing-proto`, and the result streams back as binary packets, one per chunk, on a keep-alive connection. Use the Python or JavaScript client rather than speaking it yourself.
 
-```bash
-curl -s -X POST 'http://localhost:6666/query?graph=my_graph' \
-     -d '{"query": "MATCH (n:$lbl) RETURN count(n)", "parameters": {"lbl": "Person"}}'
+- **Size limit:** a request (query text plus parameters) must fit in **1 MiB**.
+  - **Request too big:** the server refuses it with `Protocol error from server: …` and closes the connection. Call `client.reconnect()` and `set_graph()` again.
+  - **Parameters over the limit:** the Python SDK refuses them before sending, with `The query parameters exceed 1048576 bytes`. That client is then broken for parameterized queries (see `SKILL.md`), so create a new one.
+- **Change and commit:** a `change` or `commit` that doesn't exist is an error (`CHANGE_NOT_FOUND: Change '99' does not exist`), never a silent fallback to main.
+
+---
+
+## JavaScript and TypeScript: the `turingdb` npm package
+
+`npm install turingdb@3.1` (match the server version). It runs in Node.js 18+ and in browsers, ships TypeScript declarations, and decodes results with a bundled WebAssembly module.
+
+```js
+import { TuringClient, TuringQueryError } from "turingdb";
+
+const client = new TuringClient({
+    url: "http://localhost:6686/query",   // http://<host>:<port>/query; default "/query"
+    graph: "people",                      // default "default"
+    // authToken: "s3cret",               // for a server started with -auth-on
+});
+
+// plain arrays: chunks → columns → rows; 64-bit integers as number
+const [[names, ages]] = await client.queryData(
+    "MATCH (p:Person) WHERE p.age >= $age RETURN p.name, p.age",
+    { parameters: { age: 30 } },
+);
+
+// typed columns and the server time
+const { chunks, execTimeMs } = await client.query("MATCH (n) RETURN count(n)");
 ```
 
-- **Body:** `query` (string, required) and `parameters` (object, optional). A plain-text body fails with `PARSE_ERROR: The request body must be a JSON object`, and any other field with `PARSE_ERROR: Unknown field '<name>' in the request body`.
-- **Optional query-string params:** `change=<decimal change id>` (as `CHANGE NEW` returns it) and `commit=<hash>`. A value that doesn't parse, or names a change or commit that doesn't exist, is an error, not a silent fallback to main.
-- **Size limit:** the request line, headers and body together must fit in **1 MiB**. A bigger request gets HTTP 413 with `{"error":"REQUEST_TOO_BIG",…}`.
-- **Success response:** `{"header":{"column_names":[...],"column_types":[...]},"data":[chunk,...],"time":ms}`, where each chunk is a list of columns.
-- **Error response:** `{"error":"PARSE_ERROR|ANALYZE_ERROR|PLAN_ERROR|EXEC_ERROR|GRAPH_NOT_FOUND|CHANGE_NOT_FOUND|COMMIT_NOT_FOUND|...","error_details":"..."}`. The details name the missing graph, change or commit (e.g. `Change '99' does not exist`).
+- **Node.js can't reach port 6666.** Its `fetch` blocks 6666 as an unsafe port, so start the server on another one: `turingdb -demon -p 6686`.
+- **Browsers:** the server sends no CORS headers. Serve `/query` from the page's own origin through a proxy to the server (Vite `server.proxy`, nginx `proxy_pass`) and leave `url` at its default `/query`. With Vite, add `optimizeDeps: { exclude: ["turingdb"] }` so the client stays next to its `.wasm` file. Let the proxy add the auth token rather than putting it in page code.
+- **Options per query:** `parameters`, `graph`, `change`, `commit`, `signal` (an `AbortSignal`).
+- **Client methods:** `setGraph` / `getGraph`, `setChange(id | "main")`, `setCommit(hash | "head")` and `setAuthToken`.
+- **Writes:** run them inside a change, as in Python. Start one with `CHANGE NEW`, take the ID from the result, call `setChange(id)`, then write, `CHANGE SUBMIT` and `setChange("main")`.
+- **Errors:** query errors reject with a `TuringQueryError` whose `status` is the code (`PARSE_ERROR`, …) and whose `message` points at the error.
+
+Each query is a separate HTTP request, and creating a client opens no connection.
 
 ---
 
@@ -160,17 +190,15 @@ curl -s -X POST 'http://localhost:6666/query?graph=my_graph' \
 When you want a self-contained engine with no server to start, stop, or connect to, use the **embedded** backend — it runs the database in-process.
 
 ```python
+import os
 from turingdb import TuringDB
 
-client = TuringDB(type="embedded", data_dir="<path>")   # in-process, no server; omit data_dir for ~/.turing
+client = TuringDB(type="embedded", data_dir=os.path.expanduser("~/.turing"))   # omit data_dir for ~/.turing
 ```
 
-- **`data_dir`** is the root data directory (holds `graphs/`, `data/`, …). Omit it to use the default `~/.turing`.
+- **`data_dir`** is the root data directory (holds `graphs/`, `data/`, …). Omit it to use the default `~/.turing`. Pass an **absolute path**: a leading `~` is not expanded.
 - **No server machinery:** there is no daemon, socket, port, readiness polling, or stop/cleanup.
 - **Persistence:** writes still persist to disk on `CHANGE SUBMIT` (same `data_dir`), so work survives the process ending.
+- **Same API:** queries, parameters and DataFrames behave as on a server.
 
-The embedded backend does **not** support the browser visualizer, `list_available_graphs()`, concurrent multi-process access, S3 transfers, or `token=`. Use a server for those.
-
-## Native binary backend
-
-`TuringDB(type="native", host="localhost", port=6666)` speaks TuringDB's binary protocol. It only works against a server started with the env var `USE_TURING_PROTO=1`. That server is then binary-only, so curl, the JSON client and the visualizer stop working against it. Pointed at a normal HTTP server, the native client errors or hangs. Stick with the default `json` backend unless you control the server and need the extra throughput.
+The embedded backend does **not** support the browser visualizer, concurrent multi-process access, S3 transfers, `token=` or `host=`. Use a server for those.
