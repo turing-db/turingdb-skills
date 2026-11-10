@@ -77,7 +77,7 @@ Based on what the user is asking, immediately read the matching file from this s
 | Task | File |
 |------|------|
 | Install, start/stop a server, connect (Python native or embedded, auth), the JavaScript/TypeScript client, load/create a graph | `startup.md` |
-| Reading data: MATCH, label expressions, OPTIONAL MATCH, WHERE, paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps, subqueries, functions, points, parameters, LOAD CSV | `querying.md` |
+| Reading data: MATCH, label expressions, OPTIONAL MATCH, WHERE, paths, WITH, NEXT, WHEN, aggregation, UNWIND, maps, subqueries, functions, points, parameters, LOAD CSV; **use cases** for choosing between reduce, allReduce, COLLECT, EXISTS/COUNT, CALL and NEXT | `querying.md` |
 | Writing data: CREATE, MERGE, SET (incl. from a map), REMOVE, DELETE, FOREACH, bulk writes with parameters, bulk edges by native ID, the change/commit workflow, indexes | `writing.md` |
 | Importing external data: CSV, JSONL, GML, Parquet (`LOAD PARQUET` and `turing-parquet`), Neo4j migration | `importing.md` |
 | Paths and algorithms: shortest path, variable-length paths, vector/embedding search, writing embeddings back (`LOAD EMBEDDING`), geographic distances, distributed GNN training with `gnn.graphSAGE` sampling | `algorithms.md` |

@@ -1,6 +1,6 @@
 ---
 name: turingdb-querying
-description: Use when reading data from TuringDB v3.1 — MATCH/OPTIONAL MATCH patterns, label expressions, variable-length and quantified paths, WHERE, WITH, NEXT, WHEN conditional queries, aggregation, UNWIND, lists, maps and map projection, CASE, reduce/allReduce, EXISTS/COUNT/COLLECT/CALL subqueries, UNION, built-in functions, points, query parameters, LOAD CSV, and result types. Does not cover writes (see writing.md) or shortest path / vector search (see algorithms.md).
+description: Use when reading data from TuringDB v3.1, or choosing between reduce, allReduce, COLLECT, EXISTS/COUNT, CALL and NEXT (use cases) — MATCH/OPTIONAL MATCH patterns, label expressions, variable-length and quantified paths, WHERE, WITH, NEXT, WHEN conditional queries, aggregation, UNWIND, lists, maps and map projection, CASE, reduce/allReduce, EXISTS/COUNT/COLLECT/CALL subqueries, UNION, built-in functions, points, query parameters, LOAD CSV, and result types. Does not cover writes (see writing.md) or shortest path / vector search (see algorithms.md).
 ---
 
 # TuringDB: Querying
@@ -194,7 +194,7 @@ ORDER BY hops
 ```
 
 - `nodes(p)` and `relationships(p)` return lists of nodes and edges. Read properties through a list comprehension, or fold them with `reduce(t = 0, r IN relationships(p) | t + r.distance)`.
-- **Test every step** with `allReduce(acc = init, x IN list | step, predicate)`. It folds like `reduce` and is true when the predicate holds after every step, so it can stop a path early:
+- **Test every step** with `allReduce(acc = init, x IN list | step, predicate)`. It folds like `reduce` and is true when the predicate holds after every step (see Use cases below for when to use which):
 
 ```cypher
 MATCH p = (a:Person {name: 'Alice'})-[:KNOWS]->+(b)
@@ -469,6 +469,172 @@ CALL { MATCH (p:Person) RETURN p.name AS nm UNION MATCH (c:Company) RETURN c.nam
 - **Not supported:**
   - `CALL { } IN TRANSACTIONS`.
   - `OPTIONAL CALL` on a *procedure* ("OPTIONAL CALL not supported").
+
+## Use cases: reduce, allReduce, COLLECT, EXISTS / COUNT, CALL and NEXT
+
+Pick the construct by the shape of the question. Every example below runs on TuringDB 3.1; the comments give its result on a small sample graph.
+
+| You need… | Use |
+|---|---|
+| One value from a list: a total, a product, a maximum, a label | `reduce` |
+| Paths where a running state stays valid at **every** step | `allReduce` |
+| A list per row, several lists per row, or nested documents | `COLLECT { }` |
+| To keep or drop rows by whether, or how often, a sub-pattern exists | `EXISTS { }` / `COUNT { }` |
+| Several columns per row from a sub-query (top-1 row, per-row aggregates), or sorting a UNION | `CALL (x) { }` |
+| Several steps in one request: post-process a UNION, branch per row, write then use | `NEXT` |
+
+### reduce: fold a list into one value
+
+Use it for totals, products, extremes and labels along a path or over a list property. It works on one list per row; to fold across rows, use aggregates (`sum`, `collect`).
+
+```cypher
+// total distance, longest hop and a readable route, in one row
+MATCH p = (a:Station {name: 'Bromsgrove'})-[:LINK*1..6]->(b:Station {name: 'Worcester Shrub Hill'})
+WITH p, [n IN nodes(p) | n.name] AS names
+RETURN reduce(s = head(names), x IN tail(names) | s + ' → ' + x) AS route,          // 'Bromsgrove → Droitwich Spa → Worcester Shrub Hill'
+       reduce(km = 0.0, r IN relationships(p) | km + r.distance) AS km,              // 11.92
+       reduce(m = 0.0, r IN relationships(p) | CASE WHEN r.distance > m THEN r.distance ELSE m END) AS longestHop
+ORDER BY km LIMIT 1
+
+RETURN reduce(conf = 1.0, x IN [0.9, 0.8, 0.5] | conf * x) AS chainConfidence     // 0.36: confidence of a chain
+```
+
+### allReduce: a condition on the running state, at every step
+
+Use it when the state **during** a path matters, not only its end:
+- **Ordered steps:** each edge later (or larger) than the one before. Carry the previous value in a map accumulator.
+- **Running totals that go up and down:** a balance that must never go negative, stock that must never run out.
+- **State rules:** no two consecutive edges of the same type, at most one transfer, and similar.
+
+```cypher
+// event chains: the since years increase along the path
+MATCH p = (a:Person {name: 'Alice'})-[:KNOWS]->+(b)
+WHERE allReduce(acc = {}, r IN relationships(p) | {prev: acc.cur, cur: r.since},
+                acc.prev IS NULL OR acc.prev < acc.cur)
+RETURN b.name, [r IN relationships(p) | r.since] AS years
+
+// a balance that dips below zero fails even if it ends positive
+RETURN allReduce(b = 100, x IN [-120, 50] | b + x, b >= 0) AS neverNegative,     // false
+       reduce(b = 100, x IN [-120, 50] | b + x) >= 0 AS endsPositive             // true
+
+// alternate edge types: never two hops of the same type in a row
+MATCH p = (a:Person {name: 'Alice'})-[:KNOWS|WORKS_AT]->{1,3}(b)
+WHERE allReduce(acc = {}, r IN relationships(p) | {prev: acc.cur, cur: type(r)},
+                acc.prev IS NULL OR acc.prev <> acc.cur)
+RETURN [n IN nodes(p) | n.name] AS route                                      // Alice→Bob→Acme kept, Alice→Bob→Carol dropped
+```
+
+- **For a total that only grows** (non-negative weights), `reduce(…) <= $budget` keeps the same paths. `allReduce` is still faster (330 ms against 600 ms on the 1.8M paths below), because it stops folding a path at its first failing step.
+- **It doesn't prune the expansion.** Every path of the pattern is enumerated first, then tested: 1.8M paths of `-[*1..19]->` take 330 ms with `allReduce`. **Always bound the length** (`*1..6`, `{1,6}`).
+
+### COLLECT { }: a list per row
+
+Use it instead of `OPTIONAL MATCH … collect()` when you want:
+- **Several independent lists per row.** Two OPTIONAL MATCHes multiply rows, so `collect()` repeats values (`['Bob', 'Bob']`).
+- **Rows with no match kept**, with an empty list rather than a dropped row.
+- **Top-k per row**, with ORDER BY and LIMIT inside.
+- **Nested documents**, such as the JSON an API returns: put COLLECT inside a map projection.
+- **A filter on a derived list** (`x IN COLLECT {…}`, `size(COLLECT {…}) >= 2`).
+
+```cypher
+MATCH (p:Person)
+RETURN p.name,
+  COLLECT { MATCH (p)-[:KNOWS]->(f) RETURN f.name } AS friends,        // Dave: []
+  COLLECT { MATCH (p)-[:WORKS_AT]->(c) RETURN c.name } AS employers
+
+MATCH (p:Person)                                                     // top 2 oldest friends per person
+RETURN p.name, COLLECT { MATCH (p)-[:KNOWS]-(f) RETURN f.name ORDER BY f.age DESC LIMIT 2 } AS oldestFriends
+
+MATCH (c:Company)                                                    // one nested document per company
+RETURN c {.name, .founded,
+  staff: COLLECT { MATCH (p:Person)-[w:WORKS_AT]->(c) RETURN p {.name, .age, role: w.role} }
+} AS company
+
+MATCH (p:Person)                                                     // people with a friend at Acme
+WHERE 'Acme' IN COLLECT { MATCH (p)-[:KNOWS]->(:Person)-[:WORKS_AT]->(c) RETURN c.name }
+RETURN p.name
+```
+
+The body can be any query: `UNION` to merge sources into one list, `NEXT` for several steps (two hops, then a filter), `WHEN` for a different list per kind of row.
+
+### EXISTS { } and COUNT { }: filter rows by a sub-pattern
+
+Use them to keep or drop rows without changing them. There's no grouping and no extra rows:
+- **Anti-joins:** rows with no match (`NOT EXISTS`).
+- **Thresholds:** at least n matches. Unlike `MATCH … WITH count(*) … WHERE`, rows with zero matches are tested too, and nothing is regrouped.
+- **Conditions on a multi-hop or filtered sub-pattern.**
+- **A different rule per kind of row**, with WHEN inside (every branch returns the same column names).
+
+```cypher
+MATCH (p:Person) WHERE NOT EXISTS { (p)-[:WORKS_AT]->() } RETURN p.name           // Dave: no employer
+MATCH (c:Company) WHERE COUNT { (:Person)-[:WORKS_AT]->(c) } >= 2 RETURN c.name   // Acme
+MATCH (p:Person)                                                                 // knows an older Acme employee
+WHERE EXISTS { MATCH (p)-[:KNOWS]->(f)-[:WORKS_AT]->(:Company {name: 'Acme'}) WHERE f.age > p.age }
+RETURN p.name
+
+MATCH (p:Person)                       // Londoners must know someone, everyone else must like something
+WHERE EXISTS {
+  WHEN p.city = 'London' THEN MATCH (p)-[:KNOWS]->(x) RETURN x
+  ELSE MATCH (p)-[:LIKES]->(x) RETURN x
+}
+RETURN p.name
+```
+
+### CALL (x) { }: rows per row
+
+Use it when the per-row result has **several columns**, which COLLECT can't hold: the top-1 row per group, or several aggregates per row. Use it also to sort or limit the combined rows of a UNION. `OPTIONAL CALL` keeps the outer rows that get nothing.
+
+```cypher
+MATCH (c:Company)                                          // oldest employee per company, with their age
+CALL (c) {
+  MATCH (p:Person)-[:WORKS_AT]->(c)
+  RETURN p.name AS oldest, p.age AS age ORDER BY p.age DESC LIMIT 1
+}
+RETURN c.name, oldest, age
+
+CALL {                                                     // sort and limit across a UNION
+  MATCH (p:Person) RETURN p.name AS name, 'person' AS kind
+  UNION
+  MATCH (c:Company) RETURN c.name AS name, 'company' AS kind
+}
+RETURN name, kind ORDER BY name LIMIT 3
+```
+
+### NEXT: several steps in one request
+
+Use `WITH` to pass rows on inside one query. Use `NEXT` when a step must be a whole query:
+- **After a UNION:** count, sort or deduplicate the combined rows.
+- **Before a WHEN:** branch per row on values the previous step computed.
+- **After a write:** a later step sees what an earlier step created, **without COMMIT**.
+- **Instead of a `;` script or several client round trips:** pick something, then expand from it.
+
+Every RETURN item before `NEXT` needs an alias, and only returned columns carry over (nodes stay nodes).
+
+```cypher
+// the biggest city, then its people
+MATCH (p:Person) RETURN p.city AS city, count(*) AS n ORDER BY n DESC, city LIMIT 1
+NEXT
+MATCH (p:Person {city: city}) RETURN city, p.name AS name
+
+// post-process a UNION
+MATCH (:Person)-[:KNOWS]->(f) RETURN f.name AS name
+UNION
+MATCH (:Person)-[:WORKS_AT]->(c) RETURN c.name AS name
+NEXT
+RETURN count(*) AS reachable, collect(name) AS names
+
+// branch per row on a computed value
+MATCH (p:Person) RETURN p.name AS name, COUNT { (p)-[:KNOWS]->() } AS out
+NEXT
+WHEN out = 0 THEN RETURN name, 'no friends' AS status
+ELSE RETURN name, 'has friends' AS status
+
+// write, then use what was written, in one request (inside a change)
+CREATE (t:Tag {name: 'vip'}) RETURN t
+NEXT
+MATCH (p:Person) WHERE 'vip' IN p.tags CREATE (p)-[:TAGGED]->(t)
+RETURN count(*) AS tagged
+```
 
 ## Built-in functions
 
